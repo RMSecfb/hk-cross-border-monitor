@@ -1,0 +1,21 @@
+# ===== 港股監控系統 基本設定 =====
+# 資料輸出位置（相對於 repo 根目錄）
+data_dir: data
+
+# Yahoo 批次抓取：每批幾檔、批與批之間停幾秒（被限流時調小 batch / 調大 sleep）
+batch_size: 150
+batch_sleep_sec: 3
+max_retry: 3
+
+# 日線歷史：第一次初始化下載幾個月；計算 MA、均量時往回讀幾個交易日
+init_period: 6mo
+history_days: 60
+
+# 盤中快照在 repo 中保留幾天（較舊的會在盤後刪除；git 歷史仍可找回）
+keep_snapshot_days: 30
+
+# 判斷今天是否開市用的指標股（盈富基金）
+market_probe: "2800.HK"
+
+# 是否排除人民幣櫃台（代碼 8xxxx），避免與港幣櫃台重複
+exclude_rmb_counter: true
