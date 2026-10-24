@@ -186,11 +186,28 @@ alerts = read_csv(DATA / "alerts" / f"alerts_{ymd}.csv")
 eod = read_csv(DATA / "report" / f"eod_alerts_{ymd}.csv")
 alerts_all = alerts if not alerts.empty else eod
 
+
+def data_until(alerts_df, snap_df, day_str):
+    """行情資料截止時間（HH:MM）。
+    快照檔名帶的是程式執行時點，非行情時間，兩者可能差很多（例如補跑），
+    故一律以實際行情時間為準：快照的 last_time → 警報最後時間 → status。"""
+    for df, col in ((snap_df, "last_time"), (alerts_df, "time")):
+        if not df.empty and col in df.columns:
+            t = pd.to_datetime(df[col], errors="coerce").max()
+            if pd.notna(t):
+                return f"{t:%H:%M}"
+    return status.get("data_until", "-") if status.get("trade_date") == day_str else "-"
+
+
+until = data_until(alerts_all, snap, day)
+
 # ---------- 標題與指標 ----------
 st.title(f"港股交易監控　{day}")
 c = st.columns(5)
-c[0].metric("監控檔數", f"{len(snap):,}" if not snap.empty else "-")
-c[1].metric("最新快照", snaps[-1].stem[-6:-4] + ":" + snaps[-1].stem[-4:-2] if snaps else "-")
+c[0].metric("取得行情檔數",
+            f"{len(snap):,} / {status.get('stocks_total', len(snap)):,}" if not snap.empty else "-",
+            help="分母為監控名單全數檔數，分子為當次實際取得行情之檔數。")
+c[1].metric("資料截至", until, help="行情最後更新時間（Yahoo 延遲約 15 分鐘），非程式執行時間。")
 # 已有盤後預警列表時以盤後結果為準（每檔每項監控一列）；否則用盤中累計警報
 day_rep = read_csv(DATA / "report" / f"eod_report_{ymd}.csv")
 if not day_rep.empty:
@@ -204,10 +221,10 @@ for i, lv in enumerate(LEVELS):
 cfg_rules = yaml.safe_load((ROOT / "config" / "rules.yaml").read_text(encoding="utf-8"))
 
 
-def _rule_summary(alerts_df, snap_df, is_eod, rep_day_str):
-    """規則生成監控摘要（無需 API）"""
-    now_hkt = dt.datetime.now(HKT)
-    time_str = rep_day_str if is_eod else now_hkt.strftime("%H:%M")
+def _rule_summary(alerts_df, snap_df, is_eod, rep_day_str, until_str=""):
+    """規則生成監控摘要（無需 API）。
+    盤中以行情資料截止時間為準，不取現在時間——報告可能於盤後才下載。"""
+    time_str = rep_day_str if is_eod else (until_str or "-")
     src_str = "盤後報告" if is_eod else "盤中監控"
 
     if alerts_df.empty and snap_df.empty:
@@ -283,12 +300,11 @@ def pick_groq_model(groq_key):
     return None, f"帳號可用的模型中沒有對話模型：{', '.join(avail[:8])}"
 
 
-def _groq_summary(alerts_df, snap_df, is_eod, rep_day_str, groq_key):
+def _groq_summary(alerts_df, snap_df, is_eod, rep_day_str, groq_key, until_str=""):
     """用 Groq API 生成摘要（按鈕觸發）"""
     try:
         import requests as req
-        now_hkt = dt.datetime.now(HKT)
-        time_str = rep_day_str if is_eod else now_hkt.strftime("%H:%M")
+        time_str = rep_day_str if is_eod else (until_str or "-")
         src_str = "盤後報告" if is_eod else "盤中監控"
 
         # 準備統計數字
@@ -331,10 +347,10 @@ def _groq_summary(alerts_df, snap_df, is_eod, rep_day_str, groq_key):
             raise RuntimeError(f"HTTP {resp.status_code}・模型 {model}・{resp.text[:300]}")
         return resp.json()["choices"][0]["message"]["content"].strip(), model
     except Exception as e:
-        return f"（AI 摘要失敗：{e}）\n\n" + _rule_summary(alerts_df, snap_df, is_eod, rep_day_str), None
+        return f"（AI 摘要失敗：{e}）\n\n" + _rule_summary(alerts_df, snap_df, is_eod, rep_day_str, until_str), None
 
 
-def summary_panel(alerts_df, snap_df, is_eod=False, rep_day_str="", day_key=""):
+def summary_panel(alerts_df, snap_df, is_eod=False, rep_day_str="", day_key="", until_str=""):
     """監控摘要區塊（表格上方）。回傳目前顯示的摘要文字，供匯出報告沿用。
     盤中與盤後各自獨立存放，切換頁籤不會互相覆蓋。"""
     try:                               # 未設定 secrets.toml 時 st.secrets 會丟例外
@@ -350,7 +366,7 @@ def summary_panel(alerts_df, snap_df, is_eod=False, rep_day_str="", day_key=""):
     with st.container(border=True):
         st.markdown(f"**📋 {label}**")
         if st.session_state.get(k_day) != day_key:       # 換日期就回到規則摘要
-            st.session_state[k_txt] = _rule_summary(alerts_df, snap_df, is_eod, rep_day_str)
+            st.session_state[k_txt] = _rule_summary(alerts_df, snap_df, is_eod, rep_day_str, until_str)
             st.session_state[k_day] = day_key
             st.session_state[k_ai] = False
 
@@ -363,13 +379,13 @@ def summary_panel(alerts_df, snap_df, is_eod=False, rep_day_str="", day_key=""):
             if groq_key and st.button("🤖 AI 分析", key=f"ai_btn_{kind}",
                                       help="使用 Groq AI 生成深度分析摘要"):
                 with st.spinner("AI 分析中…"):
-                    txt_ai, used = _groq_summary(alerts_df, snap_df, is_eod, rep_day_str, groq_key)
+                    txt_ai, used = _groq_summary(alerts_df, snap_df, is_eod, rep_day_str, groq_key, until_str)
                 st.session_state[k_txt] = txt_ai
                 st.session_state[k_ai] = bool(used)
                 st.session_state[k_model] = used
                 st.rerun()
             if st.session_state.get(k_ai) and st.button("↩ 規則摘要", key=f"rule_btn_{kind}"):
-                st.session_state[k_txt] = _rule_summary(alerts_df, snap_df, is_eod, rep_day_str)
+                st.session_state[k_txt] = _rule_summary(alerts_df, snap_df, is_eod, rep_day_str, until_str)
                 st.session_state[k_ai] = False
                 st.rerun()
     return st.session_state.get(k_txt, "")
@@ -392,7 +408,7 @@ def rule_pivot(df, idx, val):
     return p.sort_values("合計", ascending=False)
 
 
-def intraday_meta(alerts_df, snap_df, day_str, summary_text, snap_label):
+def intraday_meta(alerts_df, snap_df, day_str, summary_text, until_label, run_at="", total=None):
     """盤中報告：把累計警報整理成中文欄位的明細表"""
     d = alerts_df.copy()
     det = pd.DataFrame({
@@ -407,12 +423,15 @@ def intraday_meta(alerts_df, snap_df, day_str, summary_text, snap_label):
     det = det.sort_values(["等級", "時間"], key=lambda s: s.map(LEVEL_ORDER) if s.name == "等級" else s,
                           ascending=[True, False])
     ec = d["level"].value_counts()
-    stats = [("報告日期", day_str), ("最新快照", snap_label),
-             ("監控檔數", int(len(snap_df))), ("觸發檔數", int(d["code"].nunique())),
-             ("警報筆數", int(len(d)))]
+    got = int(len(snap_df))
+    stats = [("報告日期", day_str), ("資料截至", until_label)]
+    if run_at:
+        stats.append(("程式執行時間", run_at))
+    stats += [("取得行情檔數", f"{got:,} / {total:,}" if total else f"{got:,}"),
+              ("觸發檔數", int(d["code"].nunique())), ("警報筆數", int(len(d)))]
     stats += [(f"{lv}燈", int(ec.get(lv, 0))) for lv in LEVELS]
     n_hi = int(det["等級"].isin(PDF_LEVELS).sum())
-    return dict(title="港股跨境交易監控盤中報告", day_label=f"{day_str}　最新快照 {snap_label}",
+    return dict(title="港股跨境交易監控盤中報告", day_label=f"{day_str}　資料截至 {until_label}",
                 summary_text=summary_text.replace("**", ""), stats=stats,
                 rule_pivot=rule_pivot(det, "監控類型", "股票代碼"), detail=det,
                 detail_note=f"PDF 只列紅燈與橙燈共 {n_hi:,} 列中的前 200 列；"
@@ -474,8 +493,8 @@ tab_alert, tab_vcm, tab_rank, tab_stock, tab_eod, tab_trend, tab_param = st.tabs
 
 # ---------- 警報 ----------
 with tab_alert:
-    snap_label = (snaps[-1].stem[-6:-4] + ":" + snaps[-1].stem[-4:-2]) if snaps else "-"
-    sum_intraday = summary_panel(alerts_all, snap, is_eod=False, rep_day_str=day, day_key=ymd)
+    sum_intraday = summary_panel(alerts_all, snap, is_eod=False, rep_day_str=day, day_key=ymd,
+                                 until_str=until)
     if alerts_all.empty:
         st.info("本日尚無警報。")
     else:
@@ -498,7 +517,9 @@ with tab_alert:
         st.dataframe(by_rule.reindex(columns=[l for l in LEVELS if l in by_rule.columns]), use_container_width=True)
 
         download_panel("intraday", ymd,
-                       lambda: intraday_meta(alerts_all, snap, day, sum_intraday, snap_label),
+                       lambda: intraday_meta(alerts_all, snap, day, sum_intraday, until,
+                                             status.get("run_at", "") if status.get("trade_date") == day else "",
+                                             status.get("stocks_total")),
                        len(alerts_all))
 
 # ---------- VCM 監控 ----------
