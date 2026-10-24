@@ -19,13 +19,10 @@ GitHub Actions（雲端，可連 Yahoo / HKEX）
           └─► 公司電腦 git pull 後由其他系統讀取 data/
 ```
 
-## 一、第一次設定
+## 一、批次設定
 
-1. 在公司 GitHub 組織建立**私有** repo，把本資料夾內容全部上傳（含 `.github/`）。
-2. repo → **Settings → Actions → General → Workflow permissions** 選 **Read and write permissions**。
-3. repo → **Actions** → 選「盤後批次」→ **Run workflow**，勾選「初始化」。
-   約 10–20 分鐘，會下載監控名單（HKEX 證券名單、VCM 名單）與約半年日線，建立 `data/stats`。
-4. （選用）Actions →「每週更新股本」→ Run workflow，建立 `config/shares.csv`，才會計算換手率。
+1. repo → **Actions** → 選「盤後批次」→ **Run workflow**，會下載監控名單（HKEX 證券名單、VCM 名單）與約半年日線，建立 `data/stats`。
+2. repo → **Actions** → 選「每週更新股本」→ Run workflow，建立 `config/shares.csv`，才會計算換手率。
 5. 之後盤中、盤後會自動依排程執行。想在非交易時段測試：Actions →「盤中監控」→ Run workflow，勾選 force。
 
 ## 二、排程（香港/台北時間；cron 以 UTC 撰寫）
@@ -84,20 +81,9 @@ repo 容量：快照保留 30 天（`config/settings.yaml` 的 `keep_snapshot_da
 
 ## 五、Streamlit 儀表板
 
-1. 到 [share.streamlit.io](https://share.streamlit.io) → New app → 選本 repo、分支 `main`、主程式 `streamlit_app.py`。
-2. App 設定中把可見範圍設為**僅受邀者**，並加入需要看的同仁（行情資料不可公開）。
-3. repo 每次有新 commit，Streamlit 會自動更新；頁面上的「重新整理資料」按鈕可清除快取。
-4. （選用）要在頁面上**修改參數並寫回 GitHub**、**手動啟動盤中抓取**，需設定 Secrets：
-   - 到 GitHub → Settings → Developer settings → Personal access tokens → **Fine-grained tokens** → Generate new token：
-     Resource owner 選 RMSecfb，Repository access 只選本 repo，Permissions 設 **Contents: Read and write**、**Actions: Read and write**。
-   - 到 Streamlit app → Settings → Secrets 貼上：
-     ```toml
-     GITHUB_TOKEN = "github_pat_..."
-     GITHUB_REPO = "RMSecfb/hk-cross-border-monitor"
-     ADMIN_PASSWORD = "自訂管理密碼"
-     GROQ_API_KEY = "gsk_..."        # 選用，啟用監控摘要的「AI 分析」按鈕
-     ```
-   - 參數修改會寫回 `config/rules.yaml`、`config/actions.yaml`（保留註解），並在 `config/param_log.csv` 留下修改人、原值、新值、原因；
+1. 到 https://hk-cross-border-monitor.streamlit.app/ 
+2. repo 每次有新 commit，Streamlit 會自動更新；頁面上的「重新整理資料」按鈕可清除快取。
+3. 參數修改會寫回 `config/rules.yaml`、`config/actions.yaml`（保留註解），並在 `config/param_log.csv` 留下修改人、原值、新值、原因；
      commit 紀錄即為完整軌跡。下一次排程執行即套用新參數。
 
 側欄顯示現在時間、最近一次盤中抓取、前次/下次排程與今日排程表。排程時間直接讀 `.github/workflows/*.yml`，
@@ -134,18 +120,7 @@ PDF 之所以縮減，是因為 A4 寬度有限：盤中黃燈多（常占半數
 盤後預警列表排序：風險分數由高到低 → 同一檔股票排在一起 → 等級（紅/橙/黃）→ 監控類型。
 操作建議依規則類別 × 等級設定於 `config/actions.yaml`。
 
-## 六、公司電腦取用資料
-
-公司電腦只需能連 GitHub：
-
-```
-git clone https://github.com/<組織>/<repo>.git
-git pull          # 用 Windows 工作排程器每 30 分鐘執行一次
-```
-
-其他系統直接讀取本機 `data/` 底下的檔案即可（parquet 可用 Python pandas、Power BI 等讀取）。
-
-## 七、限制
+## 六、限制
 
 - Yahoo 港股報價延遲約 15 分鐘，非官方 API，雲端主機可能被限流或缺資料；`status.json` 的 `missing` 列出抓不到的代碼。
 - VCM 為「以 1 分鐘收盤價模擬」，會漏掉分鐘內的瞬間尖峰，不等同交易所實際觸發紀錄。
@@ -153,7 +128,7 @@ git pull          # 用 Windows 工作排程器每 30 分鐘執行一次
 - 沽空異常尚未納入（HKEX 沽空報表格式待確認後加入）。
 - 行情僅供內部風控使用，repo 與 Streamlit 都必須設為私有。
 
-## 八、檔案結構
+## 七、檔案結構
 
 ```
 config/            settings.yaml、rules.yaml、actions.yaml、universe.csv（自動產生）、
