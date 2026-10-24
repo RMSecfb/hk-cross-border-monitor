@@ -197,18 +197,75 @@ with tab_eod:
     if eod.empty:
         st.info("本日盤後報告尚未產生（每個交易日 16:42 後）。")
     else:
-        summ = read_csv(DATA / "report" / f"eod_summary_{ymd}.csv", index_col=0)
-        st.subheader("警報統計")
-        st.dataframe(summ, use_container_width=True)
-        e = style_levels(eod.sort_values(["level", "time"]))
+        st.caption("收市後以全天 1 分鐘 K 線與收盤價重算全部規則（含收市競價異常）。盤中批次若有漏跑或失敗，以本報告為準。")
+        k = st.columns(4)
+        k[0].metric("警報檔數", eod["code"].nunique())
+        ec = eod["level"].value_counts()
+        for i, lv in enumerate(LEVELS):
+            k[i + 1].metric(LEVEL_LABEL[lv], int(ec.get(lv, 0)))
+        summ = eod.pivot_table(index="rule", columns="level", values="code", aggfunc="count", fill_value=0)
+        summ = summ.reindex(columns=[l for l in LEVELS if l in summ.columns])
+        summ["合計"] = summ.sum(axis=1)
+        st.subheader("各規則警報數")
+        st.dataframe(summ.sort_values("合計", ascending=False).rename_axis("規則"), use_container_width=True)
+        st.subheader("警報明細")
+        rsel = st.multiselect("規則", sorted(eod["rule"].unique()), key="eod_rule")
+        e = eod[eod["rule"].isin(rsel)] if rsel else eod
+        e = e.assign(_o=e["level"].map({l: i for i, l in enumerate(LEVELS)})).sort_values(["_o", "time"])
+        e = style_levels(e)
         e = e[[k for k in ALERT_COLS if k in e.columns]].rename(columns=ALERT_COLS)
         st.dataframe(level_styler(e), hide_index=True, use_container_width=True, height=h(len(e), 480))
 
 # ---------- 參數 ----------
+RULE_INFO = {  # 參數鍵: (監控項目, 單位, 適用範圍, Excel 出處)
+    "day_change": ("即時漲跌幅", "%", "全市場", "價格異常"),
+    "chg_1m": ("1 分鐘急漲急跌", "%", "全市場（當日成交額達門檻）", "價格異常"),
+    "chg_5m": ("5 分鐘急漲急跌", "%", "全市場（當日成交額達門檻）", "價格異常"),
+    "ma_dev": ("偏離移動平均", "%", "活躍股", "價格異常"),
+    "open_gap": ("開盤價異常", "%", "全市場", "價格異常"),
+    "cas_dev": ("收市競價異常", "%", "全市場（盤後）", "價格異常"),
+    "vol_ratio": ("成交量暴增", "倍", "全市場", "成交量異常"),
+    "vol_3m": ("3 分鐘成交量暴增", "倍", "活躍股", "成交量異常"),
+    "vol_streak": ("連續放量", "倍/分鐘", "活躍股", "成交量異常"),
+    "turnover": ("換手率異常", "%", "全市場（需股本資料）", "成交量異常"),
+}
+OTHER_INFO = {
+    "ma_days": ("偏離均線使用的 MA 天數", "日"),
+    "vol_avg_days": ("均量計算天數", "日"),
+    "min_turnover_hkd": ("當日成交額低於此值不做短時規則", "港元"),
+    "active_min_avg_turnover_hkd": ("活躍股門檻：20 日平均成交額", "港元"),
+    "vol_streak_minutes": ("連續放量的連續分鐘數", "分鐘"),
+    "min_profile_days": ("分鐘量基準至少累積天數", "交易日"),
+    "vcm_early_ratio": ("VCM 內部預警比例（門檻的幾成）", "比例"),
+}
+
 with tab_param:
     cfg = yaml.safe_load((ROOT / "config" / "rules.yaml").read_text(encoding="utf-8"))
-    rows = [{"參數": k, "黃": v.get("黃"), "橙": v.get("橙"), "紅": v.get("紅")}
-            for k, v in cfg.items() if isinstance(v, dict) and "黃" in v]
+    st.caption("黃 = 關注（記錄並通知風控）、橙 = 預警（通知主管並調查）、紅 = 嚴重（即時升級）。"
+               "修改請編輯 repo 的 config/rules.yaml，並登記於 Excel「參數調整日誌」。")
+    st.subheader("異常交易監控閾值")
+    cd = cfg.get("cooldown_min", {})
+    rows = []
+    for key, (name, unit, scope, src) in RULE_INFO.items():
+        v = cfg.get(key, {})
+        rule_name = {"day_change": "即時漲跌幅", "chg_1m": "1分鐘急漲急跌", "chg_5m": "5分鐘急漲急跌", "ma_dev": "偏離均線",
+                     "open_gap": "開盤價異常", "cas_dev": "收市競價異常", "vol_ratio": "成交量暴增",
+                     "vol_3m": "3分鐘量暴增", "vol_streak": "連續放量", "turnover": "換手率異常"}[key]
+        rows.append({"類別": src, "監控項目": name, "黃": v.get("黃"), "橙": v.get("橙"), "紅": v.get("紅"),
+                     "單位": unit, "適用範圍": scope, "冷卻（分）": cd.get(rule_name)})
     st.dataframe(pd.DataFrame(rows), hide_index=True, use_container_width=True)
-    st.caption("修改閾值請編輯 repo 中的 config/rules.yaml，並記錄於 Excel「參數調整日誌」。")
-    st.json({k: v for k, v in cfg.items() if not (isinstance(v, dict) and "黃" in v)})
+
+    st.subheader("VCM 參數")
+    uni_f = ROOT / "config" / "universe.csv"
+    if uni_f.exists():
+        u = pd.read_csv(uni_f)
+        vc = u["vcm_pct"].dropna().value_counts().sort_index()
+        vrows = [{"觸發門檻": f"±{p:.0f}%", "內部預警": f"±{p * cfg['vcm_early_ratio']:.0f}%", "股票數": int(n)}
+                 for p, n in vc.items()]
+        st.dataframe(pd.DataFrame(vrows), hide_index=True, use_container_width=True)
+    st.caption("門檻取自 HKEX 每次公布的 VCM 證券名單（每日盤後自動更新）。不適用時段：早、午市首 15 分鐘，"
+               "午市最後 20 分鐘，開市前與收市競價時段；午市不沿用早市參考價；冷靜期 5 分鐘。")
+
+    st.subheader("其他參數")
+    orows = [{"參數": desc, "設定值": cfg.get(k), "單位": unit, "設定鍵": k} for k, (desc, unit) in OTHER_INFO.items()]
+    st.dataframe(pd.DataFrame(orows), hide_index=True, use_container_width=True)
