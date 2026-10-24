@@ -249,6 +249,41 @@ def _rule_summary(alerts_df, snap_df, is_eod, rep_day_str):
     return "\n\n".join(lines)
 
 
+GROQ_API = "https://api.groq.com/openai/v1"
+# 偏好順序；Groq 會不定期下架模型，實際使用的是 /models 回報中第一個對得上的
+GROQ_PREFER = ["llama-3.3-70b-versatile", "openai/gpt-oss-120b",
+               "openai/gpt-oss-20b", "llama-3.1-8b-instant"]
+# 非對話用途（語音、分類、TTS），自動挑選時排除
+GROQ_SKIP = ("whisper", "prompt-guard", "orpheus", "tts", "guard", "embed")
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def groq_models(groq_key):
+    """問 Groq 現在有哪些模型可用（快取 1 小時）。回傳 (模型清單, 錯誤訊息)"""
+    import requests as req
+    try:
+        r = req.get(f"{GROQ_API}/models", headers={"Authorization": f"Bearer {groq_key}"}, timeout=20)
+        if r.status_code != 200:
+            return [], f"{r.status_code} {r.text[:200]}"
+        return [m["id"] for m in r.json().get("data", [])], ""
+    except Exception as e:
+        return [], str(e)
+
+
+def pick_groq_model(groq_key):
+    """選一個可用的對話模型：先照偏好順序，再退而求其次挑任一非語音類模型"""
+    avail, err = groq_models(groq_key)
+    if not avail:
+        return None, err or "無法取得模型清單"
+    for m in GROQ_PREFER:
+        if m in avail:
+            return m, ""
+    chat = [m for m in avail if not any(s in m.lower() for s in GROQ_SKIP)]
+    if chat:
+        return chat[0], ""
+    return None, f"帳號可用的模型中沒有對話模型：{', '.join(avail[:8])}"
+
+
 def _groq_summary(alerts_df, snap_df, is_eod, rep_day_str, groq_key):
     """用 Groq API 生成摘要（按鈕觸發）"""
     try:
@@ -281,17 +316,23 @@ def _groq_summary(alerts_df, snap_df, is_eod, rep_day_str, groq_key):
 
 請直接輸出摘要段落，不要加標題或編號。"""
 
+        model, err = pick_groq_model(groq_key)
+        if not model:
+            raise RuntimeError(f"取不到可用模型（{err}）")
+
         resp = req.post(
-            "https://api.groq.com/openai/v1/chat/completions",
+            f"{GROQ_API}/chat/completions",
             headers={"Authorization": f"Bearer {groq_key}", "Content-Type": "application/json"},
-            json={"model": "llama-3.3-70b-versatile", "messages": [{"role": "user", "content": prompt}],
+            json={"model": model, "messages": [{"role": "user", "content": prompt}],
                   "max_tokens": 300, "temperature": 0.3},
             timeout=30
         )
-        resp.raise_for_status()
-        return resp.json()["choices"][0]["message"]["content"].strip()
+        if resp.status_code != 200:
+            # Groq 會把真正的原因放在 body（例如模型已下架、額度用盡、金鑰無效）
+            raise RuntimeError(f"HTTP {resp.status_code}・模型 {model}・{resp.text[:300]}")
+        return resp.json()["choices"][0]["message"]["content"].strip(), model
     except Exception as e:
-        return f"（AI 摘要失敗：{e}）\n\n" + _rule_summary(alerts_df, snap_df, is_eod, rep_day_str)
+        return f"（AI 摘要失敗：{e}）\n\n" + _rule_summary(alerts_df, snap_df, is_eod, rep_day_str), None
 
 
 def summary_panel(alerts_df, snap_df, is_eod=False, rep_day_str=""):
@@ -314,10 +355,12 @@ def summary_panel(alerts_df, snap_df, is_eod=False, rep_day_str=""):
             if groq_key:
                 if st.button("🤖 AI 分析", key=f"ai_btn_{is_eod}", help="使用 Groq AI 生成深度分析摘要"):
                     with st.spinner("AI 分析中…"):
-                        st.session_state["summary_text"] = _groq_summary(
+                        txt_ai, used = _groq_summary(
                             alerts_df, snap_df, is_eod, rep_day_str, groq_key)
+                        st.session_state["summary_text"] = txt_ai
                         st.session_state["summary_day"] = (ymd, is_eod)
-                        st.session_state["summary_is_ai"] = True
+                        st.session_state["summary_is_ai"] = bool(used)
+                        st.session_state["summary_model"] = used
             if st.session_state.get("summary_is_ai"):
                 if st.button("↩ 規則摘要", key=f"rule_btn_{is_eod}"):
                     st.session_state["summary_text"] = _rule_summary(alerts_df, snap_df, is_eod, rep_day_str)
@@ -326,7 +369,7 @@ def summary_panel(alerts_df, snap_df, is_eod=False, rep_day_str=""):
             txt = st.session_state.get("summary_text", "")
             st.markdown(txt)
             if st.session_state.get("summary_is_ai"):
-                st.caption("🤖 由 Groq AI 生成")
+                st.caption(f"🤖 由 Groq AI 生成（模型 {st.session_state.get('summary_model', '-')}）")
 
 
 tab_alert, tab_vcm, tab_rank, tab_stock, tab_eod, tab_trend, tab_param = st.tabs(
