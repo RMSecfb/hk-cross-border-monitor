@@ -8,10 +8,14 @@ GitHub Actions 每 30 分鐘抓取全部港股（約 2,700 檔）的 1 分鐘 K 
 GitHub Actions（雲端，可連 Yahoo / HKEX）
   ├─ 盤中監控  每 30 分鐘 → data/snapshot、data/alerts、data/status.json
   ├─ 盤後批次  16:42      → data/daily、data/report、data/stats、data/profile、config/universe.csv
-  └─ 每週股本  週六        → config/shares.csv
+  ├─ 每週股本  週六        → config/shares.csv
+  └─ 補跑報告  手動        → 指定期間重算盤後報告
         │ commit 回 repo
         ▼
   本 repo ──► Streamlit 儀表板（streamlit_app.py）
+          │     ├─ 看盤中／盤後警報、VCM、高風險排行、趨勢追蹤
+          │     ├─ 下載 Excel／PDF 監控報告
+          │     └─ 線上改參數、手動啟動盤中抓取（回寫 GitHub，需 Secrets）
           └─► 公司電腦 git pull 後由其他系統讀取 data/
 ```
 
@@ -75,7 +79,8 @@ repo 容量：快照保留 30 天（`config/settings.yaml` 的 `keep_snapshot_da
 成交量類規則的基準來自 1 分鐘資料累積的各時段均量（`profile.csv`），因 Yahoo 1 分鐘量加總與日線量常不一致；
 3 分鐘量暴增、連續放量需 profile 累積滿 5 個交易日（`min_profile_days`）才開始判斷；
 成交量暴增在 profile 累積前暫以 20 日日線均量代替，量比會偏高。
-修改閾值請直接編輯 `config/rules.yaml`（commit 紀錄即為變更軌跡），並同步登記 Excel「參數調整日誌」。
+修改閾值有兩種方式，擇一即可：在 Streamlit 的「參數」頁直接改（會寫回 GitHub 並留下修改人與原因，見第五節），
+或直接編輯 `config/rules.yaml`。兩者的 commit 紀錄都是完整變更軌跡。
 
 ## 五、Streamlit 儀表板
 
@@ -98,16 +103,28 @@ repo 容量：快照保留 30 天（`config/settings.yaml` 的 `keep_snapshot_da
 側欄顯示現在時間、最近一次盤中抓取、前次/下次排程與今日排程表。排程時間直接讀 `.github/workflows/*.yml`，
 在 GitHub 上修改 cron 後頁面自動同步。
 
-頁面：警報、VCM 監控（依 VCM 使用率由大到小排序）、今日高風險排行、個股查詢、盤後報告（預警列表、下載 Excel／PDF）、
-趨勢追蹤（連續異常標的、風險變化排行、近 10 日上榜次數）、參數。
+頁面：警報（含盤中報告下載）、VCM 監控（依 VCM 使用率由大到小排序）、今日高風險排行、個股查詢、
+盤後報告（預警列表、可回溯日期、報告下載）、趨勢追蹤（連續異常標的、風險變化排行、近 10 日上榜次數）、參數。
 
-**監控摘要**：警報頁與盤後報告頁上方的摘要區塊，預設以規則組出當日統計敘述（不需任何 API）；
-若已設定 `GROQ_API_KEY`，可按「AI 分析」改用 Groq 生成帶判斷的分析摘要，按「規則摘要」可切回。
-AI 僅在按下按鈕時呼叫，不會在每次重新整理時自動計費。
+**監控摘要**：警報頁與盤後報告頁的最上方（表格之前）各有一塊摘要，盤中與盤後各自獨立。
+預設以規則組出當日統計敘述（不需任何 API）；若已設定 `GROQ_API_KEY`，可按「AI 分析」改用 Groq
+生成帶判斷的分析摘要，按「規則摘要」可切回。AI 僅在按下按鈕時呼叫，不會在每次重新整理時自動計費。
+模型不寫死：每次先向 Groq 查詢該金鑰目前可用的模型，依偏好順序挑選（`llama-3.3-70b-versatile` →
+`openai/gpt-oss-120b` → `openai/gpt-oss-20b` → `llama-3.1-8b-instant`），避免 Groq 下架模型後功能失效；
+失敗時會顯示 Groq 回傳的原因並自動退回規則摘要。
 
-**報告下載**（盤後報告頁）：
-- Excel：兩張工作表 — 「監控摘要」（統計數字、規則分布）與「預警列表明細」（全部列，附篩選器與等級底色）。
-- PDF：報告樣式，含標題、摘要、規則分布、預警列表（前 200 列）與頁碼。
+**報告下載**：警報頁與盤後報告頁各有「下載監控報告」。按「產生報告檔」後可下載 Excel 與 PDF，
+兩者版面一致：**摘要文字 → 統計 → 規則分布 → 明細表**，摘要放在所有表格之前；
+若先按過「AI 分析」，報告帶入的就是 AI 版摘要。產生器在 `report_export.py`，盤中盤後共用。
+
+| | 盤中報告（警報頁） | 盤後報告（盤後報告頁） |
+| --- | --- | --- |
+| 資料 | 當日累計警報，依等級排序 | 預警列表，風險分數由高到低 |
+| Excel | 全部等級、全部列、全部欄位 | 全部等級、全部列、全部欄位 |
+| PDF | **只列紅燈與橙燈**的前 200 列 | 前 200 列的重點欄位 |
+
+PDF 之所以縮減，是因為 A4 寬度有限：盤中黃燈多（常占半數以上），盤後 13 個欄位全放會把每列擠成多行。
+完整內容一律在 Excel。盤中 Excel 資料量大（上萬列約需 10–20 秒），所以改為按鈕觸發，不在每次重新整理時重算。
 
 風險分數 = 各監控項目當日最高等級加總（紅 40、橙 25、黃 10，上限 100）。
 兩個門檻分開設定：`list_min_score`（預設 30）決定是否「上榜」進入盤後預警列表；
@@ -139,9 +156,13 @@ git pull          # 用 Windows 工作排程器每 30 分鐘執行一次
 ## 八、檔案結構
 
 ```
-config/            settings.yaml、rules.yaml、universe.csv（自動產生）、shares.csv（選用）
-src/               common.py、universe.py、rules.py、intraday.py、eod.py、update_shares.py
-.github/workflows/ intraday.yml、eod.yml、shares.yml；.github/commit.sh
+config/            settings.yaml、rules.yaml、actions.yaml、universe.csv（自動產生）、
+                   shares.csv（選用）、param_log.csv（參數調整紀錄，首次儲存時建立）
+src/               common.py、universe.py、rules.py、intraday.py、eod.py、report.py、
+                   backfill.py、update_shares.py
+.github/workflows/ intraday.yml、eod.yml、shares.yml、backfill.yml；.github/commit.sh
 streamlit_app.py   儀表板
+app_support.py     GitHub API（參數寫回、啟動 workflow）與排程時間解析
+report_export.py   Excel／PDF 報告產生器（盤中、盤後共用）
 requirements.txt   Streamlit 用；requirements-pipeline.txt  Actions 用
 ```

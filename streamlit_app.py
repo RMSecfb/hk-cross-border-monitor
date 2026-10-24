@@ -377,6 +377,7 @@ def summary_panel(alerts_df, snap_df, is_eod=False, rep_day_str="", day_key=""):
 
 # ---------- 報告匯出（盤中、盤後共用）----------
 LEVEL_ORDER = {"紅": 0, "橙": 1, "黃": 2}
+PDF_LEVELS = ["紅", "橙"]     # 盤中 PDF 只列紅、橙；黃燈量大，留在 Excel
 
 
 def rule_pivot(df, idx, val):
@@ -410,11 +411,13 @@ def intraday_meta(alerts_df, snap_df, day_str, summary_text, snap_label):
              ("監控檔數", int(len(snap_df))), ("觸發檔數", int(d["code"].nunique())),
              ("警報筆數", int(len(d)))]
     stats += [(f"{lv}燈", int(ec.get(lv, 0))) for lv in LEVELS]
+    n_hi = int(det["等級"].isin(PDF_LEVELS).sum())
     return dict(title="港股跨境交易監控盤中報告", day_label=f"{day_str}　最新快照 {snap_label}",
                 summary_text=summary_text.replace("**", ""), stats=stats,
                 rule_pivot=rule_pivot(det, "監控類型", "股票代碼"), detail=det,
-                detail_note=f"盤中累計警報共 {len(det):,} 列（依等級排序），PDF 顯示前 200 列；完整明細請看 Excel。",
-                pdf_rows=200)
+                detail_note=f"PDF 只列紅燈與橙燈共 {n_hi:,} 列中的前 200 列；"
+                            f"含黃燈的完整明細共 {len(det):,} 列，請看 Excel。",
+                pdf_levels=PDF_LEVELS, pdf_rows=200)
 
 
 def eod_meta(rep, day_str, summary_text):

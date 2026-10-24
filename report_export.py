@@ -12,6 +12,7 @@ meta 欄位：
   detail       DataFrame，明細表
   detail_note  明細表上方的說明文字
   pdf_cols     PDF 明細要顯示的欄位（省略則用全部；欄位太多會擠成多行）
+  pdf_levels   PDF 明細只收這些等級（省略則全收）
   pdf_rows     PDF 明細最多列數
 """
 import io
@@ -189,6 +190,9 @@ def build_pdf(meta):
     # PDF 寬度有限，欄位太多會把每列擠成好幾行；只放重點欄位，完整欄位在 Excel
     cols = [c for c in meta.get("pdf_cols") or det.columns if c in det.columns]
     det = det[cols]
+    lv_only = meta.get("pdf_levels")          # 例如盤中只收紅、橙
+    if lv_only and "等級" in det.columns:
+        det = det[det["等級"].isin(lv_only)]
     sub = det.head(nmax)
     raw = [[str(v) for v in row] for _, row in sub.iterrows()]
     data = [[Paragraph(c, st_cell_h) for c in cols]] + \
