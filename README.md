@@ -70,7 +70,8 @@ repo 容量：快照保留 30 天（`config/settings.yaml` 的 `keep_snapshot_da
 當日成交額低於 `min_turnover_hkd`（預設 100 萬港元）的冷門股不做短時規則；
 3 分鐘量暴增、連續放量、偏離均線只監控「活躍股」（20 日平均成交額 ≥ `active_min_avg_turnover_hkd`，預設 1,000 萬港元），與 Excel 的適用範圍一致。
 成交量類規則的基準來自 1 分鐘資料累積的各時段均量（`profile.csv`），因 Yahoo 1 分鐘量加總與日線量常不一致；
-前幾個交易日 profile 尚未累積時，暫以 20 日日線均量代替，量比會偏高。
+3 分鐘量暴增、連續放量需 profile 累積滿 5 個交易日（`min_profile_days`）才開始判斷；
+成交量暴增在 profile 累積前暫以 20 日日線均量代替，量比會偏高。
 修改閾值請直接編輯 `config/rules.yaml`（commit 紀錄即為變更軌跡），並同步登記 Excel「參數調整日誌」。
 
 ## 五、Streamlit 儀表板

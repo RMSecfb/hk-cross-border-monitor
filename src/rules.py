@@ -88,12 +88,17 @@ def run_rules(bars, stats, universe, cfg, profile=None, daily_close=None):
     out = []
 
     # ---- 基準量：歷史同時段每分鐘均量，無則 20 日均量/330 ----
+    # 分鐘級量能規則（3 分鐘量暴增、連續放量）只用 1 分鐘資料累積的基準；累積未滿 min_profile_days 前不判斷，
+    # 因為以日線均量平均分攤到每分鐘，會把開收盤的正常大量誤判為暴增。
     b["bucket"] = bucket(b["time"])
     if profile is not None and not profile.empty:
-        b = b.merge(profile, on=["code", "bucket"], how="left")
+        prof = profile.copy()
+        if "n" in prof:
+            prof = prof[prof["n"] >= cfg.get("min_profile_days", 5)]
+        b = b.merge(prof[["code", "bucket", "vol_per_min"]], on=["code", "bucket"], how="left")
     else:
         b["vol_per_min"] = np.nan
-    b["base_min"] = b["vol_per_min"].fillna(b["avg_vol"] / 330).replace(0, np.nan)
+    b["base_min"] = b["vol_per_min"].replace(0, np.nan)
     g = b.groupby("code", sort=False)
 
     # ---- 冷門股過濾（當日成交額過低者不做短時指標）；活躍股 = 20 日平均成交額達門檻 ----
