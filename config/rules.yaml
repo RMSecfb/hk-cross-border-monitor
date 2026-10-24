@@ -23,8 +23,9 @@ vcm_early_ratio: 0.8        # VCM 內部預警比例（達門檻的幾成時預�
 # ===== 趨勢追蹤（盤後）=====
 # 每日風險分數 = 各規則當日最高等級的分數加總（上限 100）
 score_weights: {紅: 40, 橙: 25, 黃: 10}
-list_min_score: 30          # 分數 ≥ 此值視為「上榜」
-streak_days: 3              # 連續異常標的：最近 N 個交易日皆上榜
+list_min_score: 30          # 分數 ≥ 此值視為「上榜」（進入盤後預警列表）
+streak_min_score: 60        # 連續異常標的門檻：需連續 streak_days 日分數皆 ≥ 此值（≥ 紅+橙 或兩個紅）
+streak_days: 3              # 連續異常標的：最近 N 個交易日皆 ≥ streak_min_score
 
 # 冷卻時間（分鐘）：同一股票、同一規則、同一等級在冷卻期內只報一次
 cooldown_min:

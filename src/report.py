@@ -111,7 +111,11 @@ def build_report(alerts, uni, cfg, day, score):
     a["t"] = pd.to_datetime(a["time"])
     cnt = a.groupby(["code", "rule"]).size().rename("觸發次數")
     top = a.sort_values(["o", "t"]).drop_duplicates(["code", "rule"]).join(cnt, on=["code", "rule"])
-    top = top.sort_values(["t", "o"]).reset_index(drop=True)
+    # 排序：風險分數降冪 → 同一檔排在一起 → 等級（紅/橙/黃）→ 監控類型
+    code_score = score.set_index("code")["score"] if not score.empty else pd.Series(dtype=float)
+    top["_score"] = top["code"].map(code_score).fillna(0)
+    top = top.sort_values(["_score", "code", "o", "rule"],
+                          ascending=[False, True, True, True]).reset_index(drop=True)
 
     if "streak" not in score:
         score = score.merge(listing_stats(score, day, cfg), on="code", how="left")

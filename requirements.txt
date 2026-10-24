@@ -4,3 +4,6 @@ pyarrow
 pyyaml
 requests
 ruamel.yaml
+altair
+openpyxl
+reportlab

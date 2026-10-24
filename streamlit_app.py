@@ -2,6 +2,7 @@
 讀取 repo 內 data/ 的盤中快照、警報與盤後報告（由 GitHub Actions 每 30 分鐘更新）。
 """
 import datetime as dt
+import io
 import json
 from pathlib import Path
 
@@ -200,11 +201,140 @@ else:
 for i, lv in enumerate(LEVELS):
     c[i + 2].metric(f"{LEVEL_LABEL[lv]}（{src}）", int(cnt.get(lv, 0)))
 
+# ---------- 監控摘要 ----------
+cfg_rules = yaml.safe_load((ROOT / "config" / "rules.yaml").read_text(encoding="utf-8"))
+
+
+def _rule_summary(alerts_df, snap_df, is_eod, rep_day_str):
+    """規則生成監控摘要（無需 API）"""
+    now_hkt = dt.datetime.now(HKT)
+    time_str = rep_day_str if is_eod else now_hkt.strftime("%H:%M")
+    src_str = "盤後報告" if is_eod else "盤中監控"
+
+    if alerts_df.empty and snap_df.empty:
+        return f"【{src_str}】{time_str} — 尚無資料。"
+
+    lines = []
+    if not alerts_df.empty:
+        df = alerts_df
+        red = int((df["level"] == "紅").sum()) if "level" in df.columns else 0
+        orn = int((df["level"] == "橙").sum()) if "level" in df.columns else 0
+        yel = int((df["level"] == "黃").sum()) if "level" in df.columns else 0
+        stocks = df["code"].nunique() if "code" in df.columns else 0
+        total = red + orn + yel
+        lines.append(f"截至 {time_str}，共 **{stocks}** 檔觸發警報（{total} 筆）：紅燈 {red} 筆、橙燈 {orn} 筆、黃燈 {yel} 筆。")
+
+        # 規則分布
+        if "rule" in df.columns:
+            top_rules = df.groupby("rule").size().nlargest(3)
+            rule_str = "、".join([f"{r}（{n} 筆）" for r, n in top_rules.items()])
+            lines.append(f"觸發最多的規則：{rule_str}。")
+
+        # 高風險標的
+        if "code" in df.columns and "level" in df.columns and "name" in df.columns:
+            red_stocks = df[df["level"] == "紅"][["code", "name"]].drop_duplicates().head(5)
+            if not red_stocks.empty:
+                top_str = "、".join([f"{row['name']}（{int(row['code']):05d}）" for _, row in red_stocks.iterrows()])
+                lines.append(f"紅燈標的（前5）：{top_str}。")
+    elif not snap_df.empty:
+        lines.append(f"截至 {time_str}，共監控 **{len(snap_df):,}** 檔，尚無觸發警報。")
+
+    # 盤中額外：市場概況
+    if not is_eod and not snap_df.empty and "chg_pct" in snap_df.columns:
+        up = int((snap_df["chg_pct"] > 0).sum())
+        dn = int((snap_df["chg_pct"] < 0).sum())
+        flat = len(snap_df) - up - dn
+        lines.append(f"市場概況：上漲 {up} 檔、下跌 {dn} 檔、平盤 {flat} 檔。")
+
+    return "\n\n".join(lines)
+
+
+def _groq_summary(alerts_df, snap_df, is_eod, rep_day_str, groq_key):
+    """用 Groq API 生成摘要（按鈕觸發）"""
+    try:
+        import requests as req
+        now_hkt = dt.datetime.now(HKT)
+        time_str = rep_day_str if is_eod else now_hkt.strftime("%H:%M")
+        src_str = "盤後報告" if is_eod else "盤中監控"
+
+        # 準備統計數字
+        stats = {}
+        if not alerts_df.empty and "level" in alerts_df.columns:
+            stats["red"] = int((alerts_df["level"] == "紅").sum())
+            stats["orange"] = int((alerts_df["level"] == "橙").sum())
+            stats["yellow"] = int((alerts_df["level"] == "黃").sum())
+            stats["stocks"] = int(alerts_df["code"].nunique()) if "code" in alerts_df.columns else 0
+            if "rule" in alerts_df.columns:
+                top3 = alerts_df.groupby("rule").size().nlargest(3).to_dict()
+                stats["top_rules"] = top3
+            if "code" in alerts_df.columns and "name" in alerts_df.columns:
+                red_df = alerts_df[alerts_df["level"] == "紅"][["code", "name"]].drop_duplicates().head(5)
+                stats["red_stocks"] = [f"{row['name']}（{int(row['code']):05d}）" for _, row in red_df.iterrows()]
+        if not snap_df.empty and "chg_pct" in snap_df.columns:
+            stats["market_up"] = int((snap_df["chg_pct"] > 0).sum())
+            stats["market_down"] = int((snap_df["chg_pct"] < 0).sum())
+
+        prompt = f"""你是港股跨境交易監控系統的風險分析師。請根據以下{src_str}統計數字，以繁體中文撰寫一段監控摘要（150字以內），重點說明異常情況、主要風險集中在哪些規則或標的，以及需要關注的事項。語氣專業簡潔。
+
+時間：{time_str}
+統計數字：{stats}
+
+請直接輸出摘要段落，不要加標題或編號。"""
+
+        resp = req.post(
+            "https://api.groq.com/openai/v1/chat/completions",
+            headers={"Authorization": f"Bearer {groq_key}", "Content-Type": "application/json"},
+            json={"model": "llama-3.3-70b-versatile", "messages": [{"role": "user", "content": prompt}],
+                  "max_tokens": 300, "temperature": 0.3},
+            timeout=30
+        )
+        resp.raise_for_status()
+        return resp.json()["choices"][0]["message"]["content"].strip()
+    except Exception as e:
+        return f"（AI 摘要失敗：{e}）\n\n" + _rule_summary(alerts_df, snap_df, is_eod, rep_day_str)
+
+
+def summary_panel(alerts_df, snap_df, is_eod=False, rep_day_str=""):
+    """監控摘要區塊"""
+    try:                               # 未設定 secrets.toml 時 st.secrets 會丟例外
+        groq_key = st.secrets.get("GROQ_API_KEY", "") or ""
+    except Exception:
+        groq_key = ""
+
+    label = "盤後監控摘要" if is_eod else "盤中監控摘要"
+    with st.expander(f"📋 {label}", expanded=True):
+        # 預設顯示規則生成
+        if "summary_text" not in st.session_state or st.session_state.get("summary_day") != (ymd, is_eod):
+            st.session_state["summary_text"] = _rule_summary(alerts_df, snap_df, is_eod, rep_day_str)
+            st.session_state["summary_day"] = (ymd, is_eod)
+            st.session_state["summary_is_ai"] = False
+
+        col1, col2 = st.columns([4, 1])
+        with col2:
+            if groq_key:
+                if st.button("🤖 AI 分析", key=f"ai_btn_{is_eod}", help="使用 Groq AI 生成深度分析摘要"):
+                    with st.spinner("AI 分析中…"):
+                        st.session_state["summary_text"] = _groq_summary(
+                            alerts_df, snap_df, is_eod, rep_day_str, groq_key)
+                        st.session_state["summary_day"] = (ymd, is_eod)
+                        st.session_state["summary_is_ai"] = True
+            if st.session_state.get("summary_is_ai"):
+                if st.button("↩ 規則摘要", key=f"rule_btn_{is_eod}"):
+                    st.session_state["summary_text"] = _rule_summary(alerts_df, snap_df, is_eod, rep_day_str)
+                    st.session_state["summary_is_ai"] = False
+        with col1:
+            txt = st.session_state.get("summary_text", "")
+            st.markdown(txt)
+            if st.session_state.get("summary_is_ai"):
+                st.caption("🤖 由 Groq AI 生成")
+
+
 tab_alert, tab_vcm, tab_rank, tab_stock, tab_eod, tab_trend, tab_param = st.tabs(
-    ["警報", "VCM 監控", "市場排行", "個股", "盤後報告", "趨勢追蹤", "參數"])
+    ["警報", "VCM 監控", "今日高風險排行", "個股查詢", "盤後報告", "趨勢追蹤", "參數"])
 
 # ---------- 警報 ----------
 with tab_alert:
+    summary_panel(alerts_all, snap, is_eod=False, rep_day_str=day)
     if alerts_all.empty:
         st.info("本日尚無警報。")
     else:
@@ -232,7 +362,7 @@ with tab_vcm:
         st.info("尚無盤中快照。")
     else:
         v = snap[snap["vcm_pct"].notna()].sort_values("vcm_usage_pct", ascending=False)
-        st.caption("VCM 使用率 = 最近 5 分鐘漲跌幅 ÷ 該股 VCM 門檻。80% 以上為內部預警，100% 即達 VCM 觸發門檻（以 1 分鐘 K 線模擬）。")
+        st.caption("VCM 使用率 = 最近 5 分鐘漲跌幅 ÷ 該股 VCM 門檻。80% 以上為內部預警，100% 即達 VCM 觸發門檻（以 1 分鐘 K 線模擬）。已依使用率由大到小排序。")
         st.dataframe(
             v[["code", "name", "vcm_pct", "chg_5m_pct", "vcm_usage_pct", "price", "chg_pct", "last_time"]],
             hide_index=True, use_container_width=True, height=h(len(v)),
@@ -243,25 +373,58 @@ with tab_vcm:
                 "price": "現價", "chg_pct": st.column_config.NumberColumn("漲跌幅 %", format="%.2f"),
                 "last_time": st.column_config.DatetimeColumn("資料時間", format="HH:mm")})
 
-# ---------- 市場排行 ----------
+# ---------- 今日高風險排行 ----------
 with tab_rank:
     if snap.empty:
         st.info("尚無盤中快照。")
     else:
-        min_to = st.number_input("只看成交額 ≥（港元）", value=1_000_000, step=1_000_000)
-        s = snap[snap["turnover_hkd"] >= min_to]
-        cols = {"code": "代碼", "name": "名稱", "price": "現價", "chg_pct": "漲跌幅 %",
-                "vol_ratio": "量比", "ma_dev_pct": "偏離 MA %", "turnover_m": "成交額（百萬）"}
-        boards = [("漲幅前 20", "chg_pct", False), ("跌幅前 20", "chg_pct", True),
-                  ("量比前 20", "vol_ratio", False), ("偏離均線前 20（絕對值）", "ma_dev_abs", False)]
-        s = s.assign(ma_dev_abs=s["ma_dev_pct"].abs(), turnover_m=(s["turnover_hkd"] / 1e6).round(1))
-        r1, r2 = st.columns(2), st.columns(2)
-        for box, (title, key, asc) in zip([*r1, *r2], boards):
-            box.subheader(title)
-            t = s.sort_values(key, ascending=asc).head(20)[list(cols)].rename(columns=cols)
-            box.dataframe(t, hide_index=True, use_container_width=True)
+        st.caption("依盤中快照風險分數排行，顯示當日最需關注的標的（最近一次排程更新）。")
+        # 讀今日盤中 score（若盤後已完成則用盤後）
+        score_f_intraday = DATA / "report" / f"score_{ymd}.csv"
+        if score_f_intraday.exists():
+            score_today = pd.read_csv(score_f_intraday)
+        else:
+            # 即時估算：從快照 alerts 計算
+            score_today = pd.DataFrame()
 
-# ---------- 個股 ----------
+        min_score = st.number_input("風險分數 ≥", value=30, step=5, min_value=0, max_value=100)
+        top_n = st.number_input("顯示前 N 檔", value=30, step=5, min_value=5, max_value=100)
+
+        if not score_today.empty:
+            hi_risk = (score_today[score_today["score"] >= min_score]
+                       .sort_values("score", ascending=False)
+                       .head(int(top_n)))
+            # 補入即時價格
+            if not snap.empty and "code" in snap.columns:
+                price_map = snap.set_index("code")[["price", "chg_pct", "turnover_hkd"]].to_dict("index")
+                hi_risk = hi_risk.copy()
+                hi_risk["現價"] = hi_risk["code"].map(lambda c: price_map.get(c, {}).get("price"))
+                hi_risk["漲跌幅%"] = hi_risk["code"].map(lambda c: price_map.get(c, {}).get("chg_pct"))
+                hi_risk["成交額(萬)"] = hi_risk["code"].map(
+                    lambda c: round(price_map.get(c, {}).get("turnover_hkd", 0) / 1e4, 0))
+            hi_risk["代碼"] = hi_risk["code"].map(lambda c: f"{int(c):05d}")
+            disp = hi_risk.rename(columns={"name": "名稱", "score": "風險分數", "rules": "觸發規則",
+                                           "紅": "紅燈數", "橙": "橙燈數", "黃": "黃燈數"})
+            cols_show = [c for c in ["代碼", "名稱", "風險分數", "紅燈數", "橙燈數", "黃燈數",
+                                     "觸發規則", "現價", "漲跌幅%", "成交額(萬)"] if c in disp.columns]
+            st.caption(f"共 {len(hi_risk)} 檔分數 ≥ {min_score}")
+            sty = disp[cols_show].style.map(
+                lambda v: ramp_css(v, min_score, 100, RED_RAMP), subset=["風險分數"])
+            st.dataframe(sty.format({"風險分數": "{:.0f}", "現價": "{:.3f}",
+                                     "漲跌幅%": "{:+.2f}", "成交額(萬)": "{:,.0f}"}, na_rep="-"),
+                         hide_index=True, use_container_width=True, height=h(len(hi_risk), 600))
+        else:
+            # 若無 score 檔，退而求其次顯示漲跌幅排行
+            st.info("盤後風險分數尚未產生，以下顯示即時漲幅排行（盤後批次完成後改為風險分數排行）。")
+            min_to = st.number_input("只看成交額 ≥（港元）", value=1_000_000, step=1_000_000)
+            s = snap[snap["turnover_hkd"] >= min_to]
+            s = s.assign(turnover_m=(s["turnover_hkd"] / 1e6).round(1))
+            cols = {"code": "代碼", "name": "名稱", "price": "現價", "chg_pct": "漲跌幅 %",
+                    "vol_ratio": "量比", "turnover_m": "成交額（百萬）"}
+            top20 = s.sort_values("chg_pct", ascending=False).head(20)[list(cols)].rename(columns=cols)
+            st.dataframe(top20, hide_index=True, use_container_width=True)
+
+# ---------- 個股查詢 ----------
 with tab_stock:
     if snap.empty:
         st.info("尚無盤中快照。")
@@ -292,7 +455,6 @@ with tab_stock:
                 st.dataframe(level_styler(a), hide_index=True, use_container_width=True)
 
 # ---------- 盤後報告 ----------
-cfg_rules = yaml.safe_load((ROOT / "config" / "rules.yaml").read_text(encoding="utf-8"))
 with tab_eod:
     rep_days = sorted((p.stem[-8:] for p in (DATA / "report").glob("eod_report_*.csv")), reverse=True)
     if not rep_days:
@@ -309,9 +471,18 @@ with tab_eod:
         pass
     else:
         sd = cfg_rules.get("streak_days", 3)
+        sms = cfg_rules.get("streak_min_score", cfg_rules.get("list_min_score", 30))
+
+        # 摘要區塊
+        rep_alerts_for_summary = pd.DataFrame()
+        if not rep.empty:
+            rep_alerts_for_summary = rep.rename(columns={"等級": "level", "股票代碼": "code", "股票名稱": "name",
+                                                          "監控類型": "rule"})
+        summary_panel(rep_alerts_for_summary, pd.DataFrame(), is_eod=True, rep_day_str=fmt(rep_day))
+
         st.caption("收市後以全天 1 分鐘 K 線與收盤價重算全部規則（含收市競價異常）；每檔 × 每項監控取當日最高等級一列。"
                    f"「連續上榜」= 連續幾個交易日風險分數 ≥ {cfg_rules.get('list_min_score', 30)}，"
-                   f"達 {sd} 日以上以深色標示。盤中批次若有漏跑或失敗，以本報告為準。")
+                   f"達 {sd} 日以上以深色標示。「連續異常標的」需分數 ≥ {sms}。盤中批次若有漏跑或失敗，以本報告為準。")
         k = st.columns(5)
         k[0].metric("預警檔數", rep["股票代碼"].nunique())
         ec = rep["等級"].value_counts()
@@ -349,6 +520,272 @@ with tab_eod:
             summ["合計"] = summ.sum(axis=1)
             st.dataframe(summ.sort_values("合計", ascending=False), use_container_width=True)
 
+        # ---- 下載報告 ----
+        st.subheader("下載報告")
+        dl1, dl2 = st.columns(2)
+
+        @st.cache_data(ttl=300)
+        def _make_excel(rep_day_key):
+            """產生 Excel 報告（含摘要與明細兩張工作表）"""
+            import openpyxl
+            from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
+            from openpyxl.utils import get_column_letter
+            rep_df = read_csv(DATA / "report" / f"eod_report_{rep_day_key}.csv", dtype={"股票代碼": str})
+            if rep_df.empty:
+                return None
+            wb = openpyxl.Workbook()
+            # ---- Sheet1: 摘要 ----
+            ws1 = wb.active
+            ws1.title = "監控摘要"
+            hdr_fill = PatternFill("solid", fgColor="1F4E79")
+            hdr_font = Font(bold=True, color="FFFFFF", size=11)
+            thin = Border(left=Side(style="thin"), right=Side(style="thin"),
+                          top=Side(style="thin"), bottom=Side(style="thin"))
+            d_fmt = f"{rep_day_key[:4]}-{rep_day_key[4:6]}-{rep_day_key[6:]}"
+            ws1.merge_cells("A1:D1")
+            ws1["A1"] = f"港股跨境交易監控日報　{d_fmt}"
+            ws1["A1"].font = Font(bold=True, size=14)
+            ws1["A1"].alignment = Alignment(horizontal="center")
+            ws1.append([])
+            ws1.append(["統計項目", "數值"])
+            ec2 = rep_df["等級"].value_counts()
+            rows_s = [
+                ("報告日期", d_fmt),
+                ("預警檔數（去重）", rep_df["股票代碼"].nunique()),
+                ("預警總筆數", len(rep_df)),
+                ("紅燈（嚴重）", int(ec2.get("紅", 0))),
+                ("橙燈（預警）", int(ec2.get("橙", 0))),
+                ("黃燈（關注）", int(ec2.get("黃", 0))),
+                (f"連續上榜 ≥{cfg_rules.get('streak_days', 3)} 日（檔）",
+                 int((rep_df["連續上榜(日)"] >= cfg_rules.get("streak_days", 3)).sum())),
+            ]
+            for r in rows_s:
+                ws1.append(list(r))
+            # 規則分布
+            ws1.append([])
+            ws1.append(["規則", "紅", "橙", "黃", "合計"])
+            rule_cnt = rep_df.pivot_table(index="監控類型", columns="等級",
+                                          values="預警ID", aggfunc="count", fill_value=0)
+            for lv in ["紅", "橙", "黃"]:
+                if lv not in rule_cnt.columns:
+                    rule_cnt[lv] = 0
+            rule_cnt["合計"] = rule_cnt[["紅", "橙", "黃"]].sum(axis=1)
+            for rule_name, row2 in rule_cnt.sort_values("合計", ascending=False).iterrows():
+                ws1.append([rule_name, int(row2.get("紅", 0)), int(row2.get("橙", 0)),
+                             int(row2.get("黃", 0)), int(row2.get("合計", 0))])
+            ws1.column_dimensions["A"].width = 32
+            ws1.column_dimensions["B"].width = 16
+
+            # ---- Sheet2: 明細 ----
+            ws2 = wb.create_sheet("預警列表明細")
+            headers = list(rep_df.columns)
+            ws2.append(headers)
+            for c_idx, h_val in enumerate(headers, 1):
+                cell = ws2.cell(1, c_idx)
+                cell.fill = hdr_fill
+                cell.font = hdr_font
+                cell.alignment = Alignment(horizontal="center")
+                cell.border = thin
+            lv_fills = {"紅": PatternFill("solid", fgColor="FFCCCC"),
+                        "橙": PatternFill("solid", fgColor="FFE0B2"),
+                        "黃": PatternFill("solid", fgColor="FFF9C4")}
+            lv_col = headers.index("等級") + 1 if "等級" in headers else None
+            for _, data_row in rep_df.iterrows():
+                ws2.append(list(data_row))
+                r_idx = ws2.max_row
+                lv_val = data_row.get("等級", "")
+                for c_idx in range(1, len(headers) + 1):
+                    cell2 = ws2.cell(r_idx, c_idx)
+                    cell2.border = thin
+                    cell2.alignment = Alignment(horizontal="center", wrap_text=False)
+                    if lv_col and lv_val in lv_fills:
+                        cell2.fill = lv_fills[lv_val]
+            # 欄寬
+            col_widths = {"預警ID": 18, "時間": 10, "等級": 8, "股票代碼": 8, "股票名稱": 16,
+                          "監控類型": 14, "指標值": 20, "閾值": 14, "當日觸發次數": 10,
+                          "風險分數": 8, "連續上榜(日)": 10, "近5日上榜(日)": 10, "操作建議": 40}
+            for i, col_name in enumerate(headers, 1):
+                ws2.column_dimensions[get_column_letter(i)].width = col_widths.get(col_name, 14)
+            ws2.freeze_panes = "A2"
+            ws2.auto_filter.ref = ws2.dimensions
+            buf = io.BytesIO()
+            wb.save(buf)
+            return buf.getvalue()
+
+        @st.cache_data(ttl=300)
+        def _make_pdf(rep_day_key):
+            """產生 PDF 報告（reportlab，內嵌 CJK 字型）"""
+            try:
+                from reportlab.lib import colors
+                from reportlab.lib.pagesizes import A4
+                from reportlab.lib.styles import ParagraphStyle
+                from reportlab.lib.units import mm
+                from reportlab.pdfbase import pdfmetrics
+                from reportlab.pdfbase.cidfonts import UnicodeCIDFont
+                from reportlab.platypus import (Paragraph, SimpleDocTemplate,
+                                                Spacer, Table, TableStyle)
+            except ImportError:
+                return None
+
+            # 嘗試登錄 CJK 字型（reportlab 內建）
+            try:
+                pdfmetrics.registerFont(UnicodeCIDFont("STSong-Light"))
+                font_name = "STSong-Light"
+            except Exception:
+                font_name = "Helvetica"
+
+            rep_df = read_csv(DATA / "report" / f"eod_report_{rep_day_key}.csv", dtype={"股票代碼": str})
+            if rep_df.empty:
+                return None
+
+            buf = io.BytesIO()
+            d_fmt = f"{rep_day_key[:4]}-{rep_day_key[4:6]}-{rep_day_key[6:]}"
+            doc = SimpleDocTemplate(buf, pagesize=A4,
+                                    leftMargin=15*mm, rightMargin=15*mm,
+                                    topMargin=20*mm, bottomMargin=20*mm)
+            title_style = ParagraphStyle("title", fontName=font_name, fontSize=16,
+                                         leading=20, spaceAfter=6, alignment=1)
+            sub_style = ParagraphStyle("sub", fontName=font_name, fontSize=10,
+                                       leading=14, spaceAfter=4, alignment=1, textColor=colors.grey)
+            body_style = ParagraphStyle("body", fontName=font_name, fontSize=9,
+                                        leading=13, spaceAfter=4)
+            hdr_style = ParagraphStyle("hdr", fontName=font_name, fontSize=11,
+                                       leading=15, spaceBefore=10, spaceAfter=4,
+                                       textColor=colors.HexColor("#1F4E79"))
+
+            story = []
+
+            # 標題
+            story.append(Paragraph("港股跨境交易監控日報", title_style))
+            story.append(Paragraph(f"報告日期：{d_fmt}", sub_style))
+            story.append(Spacer(1, 6*mm))
+
+            # 摘要統計
+            story.append(Paragraph("一、監控摘要", hdr_style))
+            ec2 = rep_df["等級"].value_counts()
+            sd2 = cfg_rules.get("streak_days", 3)
+            summary_data = [
+                ["統計項目", "數值"],
+                ["預警檔數（去重）", str(rep_df["股票代碼"].nunique())],
+                ["預警總筆數", str(len(rep_df))],
+                ["紅燈（嚴重）", str(int(ec2.get("紅", 0)))],
+                ["橙燈（預警）", str(int(ec2.get("橙", 0)))],
+                ["黃燈（關注）", str(int(ec2.get("黃", 0)))],
+                [f"連續上榜 ≥{sd2} 日（檔）",
+                 str(int((rep_df["連續上榜(日)"] >= sd2).sum()))],
+            ]
+            t_summ = Table(summary_data, colWidths=[80*mm, 40*mm])
+            t_summ.setStyle(TableStyle([
+                ("FONTNAME", (0, 0), (-1, -1), font_name),
+                ("FONTSIZE", (0, 0), (-1, -1), 9),
+                ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#1F4E79")),
+                ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+                ("FONTNAME", (0, 0), (-1, 0), font_name),
+                ("ALIGN", (1, 0), (1, -1), "CENTER"),
+                ("GRID", (0, 0), (-1, -1), 0.5, colors.grey),
+                ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, colors.HexColor("#F5F5F5")]),
+            ]))
+            story.append(t_summ)
+            story.append(Spacer(1, 4*mm))
+
+            # 規則分布
+            story.append(Paragraph("二、規則分布", hdr_style))
+            rule_cnt = rep_df.pivot_table(index="監控類型", columns="等級",
+                                          values="預警ID", aggfunc="count", fill_value=0)
+            for lv in ["紅", "橙", "黃"]:
+                if lv not in rule_cnt.columns:
+                    rule_cnt[lv] = 0
+            rule_cnt["合計"] = rule_cnt[["紅", "橙", "黃"]].sum(axis=1)
+            rule_cnt = rule_cnt.sort_values("合計", ascending=False)
+            rule_data = [["規則", "紅", "橙", "黃", "合計"]]
+            for rule_name, row2 in rule_cnt.iterrows():
+                rule_data.append([rule_name, str(int(row2.get("紅", 0))),
+                                   str(int(row2.get("橙", 0))), str(int(row2.get("黃", 0))),
+                                   str(int(row2.get("合計", 0)))])
+            t_rule = Table(rule_data, colWidths=[60*mm, 20*mm, 20*mm, 20*mm, 20*mm])
+            t_rule.setStyle(TableStyle([
+                ("FONTNAME", (0, 0), (-1, -1), font_name),
+                ("FONTSIZE", (0, 0), (-1, -1), 9),
+                ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#1F4E79")),
+                ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+                ("ALIGN", (1, 0), (-1, -1), "CENTER"),
+                ("GRID", (0, 0), (-1, -1), 0.5, colors.grey),
+                ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, colors.HexColor("#F5F5F5")]),
+            ]))
+            story.append(t_rule)
+            story.append(Spacer(1, 4*mm))
+
+            # 預警列表（最多 200 列，避免 PDF 過大）
+            story.append(Paragraph("三、預警列表（風險分數前 200）", hdr_style))
+            story.append(Paragraph(f"完整明細共 {len(rep_df)} 列，PDF 顯示前 200 列；完整版請下載 Excel。", body_style))
+            show_cols = ["股票代碼", "股票名稱", "等級", "監控類型", "指標值", "風險分數", "連續上榜(日)"]
+            show_cols = [c for c in show_cols if c in rep_df.columns]
+            # 沿用 CSV 既有排序（風險分數降冪、同一檔排在一起），不再重新排序
+            sub_df = rep_df.head(200)[show_cols]
+            detail_data = [show_cols] + [list(row2) for _, row2 in sub_df.iterrows()]
+            col_w = [14*mm, 22*mm, 10*mm, 22*mm, 36*mm, 12*mm, 14*mm][:len(show_cols)]
+            # 補足欄寬
+            while len(col_w) < len(show_cols):
+                col_w.append(20*mm)
+            t_det = Table(detail_data, colWidths=col_w, repeatRows=1)
+            lv_red = colors.HexColor("#FFCCCC")
+            lv_orn = colors.HexColor("#FFE0B2")
+            lv_yel = colors.HexColor("#FFF9C4")
+            det_style = [
+                ("FONTNAME", (0, 0), (-1, -1), font_name),
+                ("FONTSIZE", (0, 0), (-1, -1), 7),
+                ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#1F4E79")),
+                ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+                ("ALIGN", (0, 0), (-1, -1), "CENTER"),
+                ("GRID", (0, 0), (-1, -1), 0.3, colors.grey),
+                ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, colors.HexColor("#F5F5F5")]),
+                ("WORDWRAP", (0, 0), (-1, -1), True),
+            ]
+            # 等級欄著色
+            if "等級" in show_cols:
+                lv_idx = show_cols.index("等級")
+                for row_idx, (_, data_row) in enumerate(sub_df.iterrows(), 1):
+                    lv_val = data_row.get("等級", "")
+                    fill_c = {"紅": lv_red, "橙": lv_orn, "黃": lv_yel}.get(lv_val)
+                    if fill_c:
+                        det_style.append(("BACKGROUND", (lv_idx, row_idx), (lv_idx, row_idx), fill_c))
+            t_det.setStyle(TableStyle(det_style))
+            story.append(t_det)
+
+            # 頁碼
+            def add_page_num(canvas, doc2):
+                canvas.saveState()
+                canvas.setFont(font_name, 8)
+                canvas.setFillColor(colors.grey)
+                canvas.drawRightString(doc2.pagesize[0] - 15*mm, 12*mm,
+                                       f"第 {doc2.page} 頁　港股跨境交易監控日報　{d_fmt}")
+                canvas.restoreState()
+
+            doc.build(story, onFirstPage=add_page_num, onLaterPages=add_page_num)
+            return buf.getvalue()
+
+        with dl1:
+            excel_bytes = _make_excel(rep_day)
+            if excel_bytes:
+                st.download_button(
+                    "📥 下載 Excel 報告", data=excel_bytes,
+                    file_name=f"hk_monitor_{rep_day}.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+            else:
+                st.caption("Excel 報告產生失敗")
+
+        with dl2:
+            if st.button("📄 產生 PDF 報告", key="gen_pdf"):
+                with st.spinner("產生中…"):
+                    pdf_bytes = _make_pdf(rep_day)
+                if pdf_bytes:
+                    st.download_button(
+                        "下載 PDF", data=pdf_bytes,
+                        file_name=f"hk_monitor_{rep_day}.pdf",
+                        mime="application/pdf", key="dl_pdf")
+                else:
+                    st.error("PDF 產生失敗（可能缺少 reportlab 套件，請確認 requirements.txt）")
+
 # ---------- 趨勢追蹤 ----------
 with tab_trend:
     hist = score_history()
@@ -358,26 +795,29 @@ with tab_trend:
         dates = sorted(hist["date"].unique())
         sd = cfg_rules.get("streak_days", 3)
         th = cfg_rules.get("list_min_score", 30)
+        streak_th = cfg_rules.get("streak_min_score", 60)   # 連續異常標的門檻
         w = cfg_rules.get("score_weights", {})
         fmt_d = lambda d: f"{d[:4]}-{d[4:6]}-{d[6:]}"
         latest, base = dates[-1], (dates[-2] if len(dates) > 1 else None)
         st.caption(f"資料範圍：最近 {len(dates)} 個交易日｜最新監控日：{fmt_d(latest)}｜比較基準日："
                    f"{fmt_d(base) if base else '-'}｜連續 {sd} 日區間：{' / '.join(fmt_d(d) for d in dates[-sd:][::-1])}")
         st.caption(f"風險分數 = 各監控項目當日最高等級加總（紅 {w.get('紅')}、橙 {w.get('橙')}、黃 {w.get('黃')}，上限 100）；"
-                   f"分數 ≥ {th} 視為上榜。")
+                   f"分數 ≥ {th} 視為「上榜」；連續異常標的需分數 ≥ {streak_th}（至少紅+橙 或兩個紅）。")
         wide = hist.pivot_table(index="code", columns="date", values="score", aggfunc="first")
         names = hist.drop_duplicates("code", keep="last").set_index("code")["name"]
         rules_latest = hist[hist["date"] == latest].set_index("code")["rules"]
 
-        st.subheader(f"連續異常標的（最近 {sd} 個交易日皆 ≥ {th}）")
+        st.subheader(f"連續異常標的（最近 {sd} 個交易日皆分數 ≥ {streak_th}）")
         if len(dates) < sd:
             st.info(f"目前只有 {len(dates)} 個交易日的資料，滿 {sd} 日後顯示。")
         else:
             lastn = dates[-sd:]
-            hit = wide[lastn].fillna(0).ge(th).all(axis=1)
+            # 使用 streak_th（60）而非 th（30）作為連續異常標的門檻
+            hit = wide[lastn].fillna(0).ge(streak_th).all(axis=1)
             cont = wide.loc[hit, lastn[::-1]].copy()
             cont.columns = ["最新分數"] + [f"前{i}日" for i in range(1, sd)]
             cont["平均"] = cont.mean(axis=1).round(1)
+            # 連續上榜天數仍用 th（30）計算
             on = wide.fillna(0).ge(th)
             cont["連續上榜(日)"] = [next((i for i, x in enumerate(on.loc[c, ::-1]) if not x), len(dates)) for c in cont.index]
             cont.insert(0, "名稱", names.reindex(cont.index))
@@ -387,7 +827,7 @@ with tab_trend:
             cont = cont.rename(columns={"code": "代碼"})
             score_cols = ["最新分數"] + [f"前{i}日" for i in range(1, sd)]
             st.caption(f"共 {len(cont)} 檔")
-            st.dataframe(cont.style.map(lambda v: ramp_css(v, th, 100, RED_RAMP), subset=score_cols)
+            st.dataframe(cont.style.map(lambda v: ramp_css(v, streak_th, 100, RED_RAMP), subset=score_cols)
                          .format({c: "{:.0f}" for c in score_cols} | {"平均": "{:.1f}"}),
                          hide_index=True, use_container_width=True, height=h(len(cont), 480))
 
@@ -443,6 +883,7 @@ OTHER_INFO = {
     "min_profile_days": ("分鐘量基準至少累積天數", "交易日"),
     "vcm_early_ratio": ("VCM 內部預警比例（門檻的幾成）", "比例"),
     "list_min_score": ("趨勢追蹤：風險分數達此值視為上榜", "分"),
+    "streak_min_score": ("連續異常標的：分數門檻（進入連續異常列表）", "分"),
     "streak_days": ("趨勢追蹤：連續異常標的的連續天數", "交易日"),
 }
 
@@ -463,7 +904,7 @@ def save_params(changes, rule_edits, other_edits, cd_edits, action_edits, who, w
     ry = YAML()
     ry.preserve_quotes = True
     ry.width = 4096
-    import io
+    import io as _io
     stamp = dt.datetime.now(HKT)
     msg = f"參數調整（{who}）：{why}"
     shas = []
@@ -476,20 +917,20 @@ def save_params(changes, rule_edits, other_edits, cd_edits, action_edits, who, w
             doc[key] = num(v)
         for rule, v in cd_edits:
             doc["cooldown_min"][rule] = num(v)
-        buf = io.StringIO()
-        ry.dump(doc, buf)
-        shas.append(gh.put_file("config/rules.yaml", buf.getvalue(), sha, msg))
+        buf2 = _io.StringIO()
+        ry.dump(doc, buf2)
+        shas.append(gh.put_file("config/rules.yaml", buf2.getvalue(), sha, msg))
     if action_edits:
         text, sha = gh.get_file("config/actions.yaml")
         doc = ry.load(text)
         for grp, lv, v in action_edits:
             doc[grp][lv] = v
-        buf = io.StringIO()
-        ry.dump(doc, buf)
-        shas.append(gh.put_file("config/actions.yaml", buf.getvalue(), sha, msg))
+        buf2 = _io.StringIO()
+        ry.dump(doc, buf2)
+        shas.append(gh.put_file("config/actions.yaml", buf2.getvalue(), sha, msg))
     text, sha = gh.get_file("config/param_log.csv")
     if not text:
-        text = "\ufeff時間,修改人,參數,原值,新值,原因\n"
+        text = "﻿時間,修改人,參數,原值,新值,原因\n"
     for item, old, new in changes:
         text += f"{stamp:%Y-%m-%d %H:%M},{who},{item},{old},{new},{why.replace(',', '，')}\n"
     gh.put_file("config/param_log.csv", text, sha, msg + "（紀錄）")
@@ -532,7 +973,8 @@ with tab_param:
     vcm_cd_new = st.data_editor(vcm_cd, hide_index=True, use_container_width=True, key="ed_vcmcd", disabled=["規則"])
 
     st.subheader("其他參數")
-    o_df = pd.DataFrame([{"鍵": k, "參數": d, "設定值": float(cfg.get(k)), "單位": unit} for k, (d, unit) in OTHER_INFO.items()])
+    o_df = pd.DataFrame([{"鍵": k, "參數": d, "設定值": float(cfg.get(k, 0)), "單位": unit}
+                         for k, (d, unit) in OTHER_INFO.items() if k in cfg])
     o_new = st.data_editor(o_df, hide_index=True, use_container_width=True, key="ed_other",
                            disabled=["鍵", "參數", "單位"], column_config={"鍵": None})
 
