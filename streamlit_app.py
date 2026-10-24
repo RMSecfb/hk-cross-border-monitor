@@ -191,9 +191,14 @@ st.title(f"港股交易監控　{day}")
 c = st.columns(5)
 c[0].metric("監控檔數", f"{len(snap):,}" if not snap.empty else "-")
 c[1].metric("最新快照", snaps[-1].stem[-6:-4] + ":" + snaps[-1].stem[-4:-2] if snaps else "-")
-cnt = alerts_all["level"].value_counts() if not alerts_all.empty else pd.Series(dtype=int)
+# 已有盤後預警列表時以盤後結果為準（每檔每項監控一列）；否則用盤中累計警報
+day_rep = read_csv(DATA / "report" / f"eod_report_{ymd}.csv")
+if not day_rep.empty:
+    cnt, src = day_rep["等級"].value_counts(), "盤後"
+else:
+    cnt, src = (alerts_all["level"].value_counts() if not alerts_all.empty else pd.Series(dtype=int)), "盤中"
 for i, lv in enumerate(LEVELS):
-    c[i + 2].metric(LEVEL_LABEL[lv], int(cnt.get(lv, 0)))
+    c[i + 2].metric(f"{LEVEL_LABEL[lv]}（{src}）", int(cnt.get(lv, 0)))
 
 tab_alert, tab_vcm, tab_rank, tab_stock, tab_eod, tab_trend, tab_param = st.tabs(
     ["警報", "VCM 監控", "市場排行", "個股", "盤後報告", "趨勢追蹤", "參數"])
