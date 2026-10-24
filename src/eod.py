@@ -49,6 +49,7 @@ def make_stats(cfg, asof):
         "prev_close": g["close"].last(),
         "ma": g["close"].apply(lambda s: s.tail(n_ma).mean() if len(s) >= n_ma else None),
         "avg_vol": g["volume"].apply(lambda s: s.tail(n_vol).mean()),
+        "avg_turnover": (d["close"] * d["volume"]).groupby(d["code"]).apply(lambda s: s.tail(n_vol).mean()),
     }).reset_index()
     shares = CONFIG / "shares.csv"
     if shares.exists():
@@ -58,19 +59,28 @@ def make_stats(cfg, asof):
     return stats
 
 
-def update_profile(bars, alpha=1 / 20):
-    """各 30 分鐘時段每分鐘均量，以指數平均累積（約等於近 20 日平均），不需保存歷史分鐘資料"""
+def update_profile(bars, window=20):
+    """各 30 分鐘時段每分鐘均量（由 1 分鐘資料累積，與盤中量同一來源）
+    前 20 天為簡單平均，之後為指數平均（約等於近 20 日），不需保存歷史分鐘資料。"""
     b = bars.assign(bucket=bucket(bars["time"]))
     today = (b.groupby(["code", "bucket"])["volume"].sum() / 30).rename("today")
     f = path("profile", "profile.csv")
     if f.exists():
-        old = pd.read_csv(f, dtype={"bucket": str}).set_index(["code", "bucket"])["vol_per_min"]
-        prof = pd.concat([old, today], axis=1)
-        prof["vol_per_min"] = prof["vol_per_min"].fillna(prof["today"]) * (1 - alpha) + prof["today"].fillna(0) * alpha
-        prof = prof["vol_per_min"]
+        old = pd.read_csv(f, dtype={"bucket": str}).set_index(["code", "bucket"])
+        if "n" not in old:
+            old["n"] = window
+        prof = old.join(today, how="outer")
+        traded = prof.groupby(level="code")["today"].transform("count") > 0      # 當天有交易的股票才更新
+        prof["today"] = prof["today"].where(~traded, prof["today"].fillna(0))
+        upd = prof["today"].notna()
+        n_new = (prof["n"].fillna(0) + 1).clip(upper=window)
+        prof.loc[upd, "vol_per_min"] = prof.loc[upd, "vol_per_min"].fillna(0) + \
+            (prof.loc[upd, "today"] - prof.loc[upd, "vol_per_min"].fillna(0)) / n_new[upd]
+        prof.loc[upd, "n"] = n_new[upd]
+        prof = prof[["vol_per_min", "n"]]
     else:
-        prof = today.rename("vol_per_min")
-    prof.round(1).reset_index().to_csv(f, index=False)
+        prof = today.rename("vol_per_min").to_frame().assign(n=1)
+    prof.round({"vol_per_min": 1}).reset_index().to_csv(f, index=False)
 
 
 def prune_snapshots(today):

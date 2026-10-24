@@ -14,16 +14,22 @@ import numpy as np
 import pandas as pd
 
 from common import (SETTINGS, download, get_logger, latest_file, load_universe, load_yaml, now_hkt, path)
-from rules import apply_cooldown, minutes_elapsed, run_rules
+from rules import apply_cooldown, expected_volume, run_rules
 
 log = get_logger("intraday")
 ONCE = ["即時漲跌幅", "偏離均線", "成交量暴增", "換手率異常", "開盤價異常"]   # 全日型：同等級一天報一次
 
 
-def load_stats(today):
-    f = latest_file("stats", "stats_*.csv", before=f"{today:%Y%m%d}") or latest_file("stats", "stats_*.csv")
+def load_stats(today, cfg):
+    f = latest_file("stats", "stats_*.csv", before=f"{today:%Y%m%d}")
     if f is None:
-        raise SystemExit("找不到 stats 基準檔，請先執行盤後初始化：python src/eod.py --init")
+        # 例如測試模式重跑「已有當日基準檔」的交易日：改用日線檔重建前一交易日基準
+        from eod import load_daily, make_stats
+        prev = load_daily(today - pd.Timedelta(days=1), 1)
+        if prev.empty:
+            raise SystemExit("找不到 stats 基準檔，請先執行盤後初始化：python src/eod.py --init")
+        log.info(f"以日線重建 {prev['date'].max():%Y-%m-%d} 基準檔")
+        return make_stats(cfg, prev["date"].max())
     log.info(f"使用基準檔 {f.name}")
     return pd.read_csv(f)
 
@@ -34,11 +40,14 @@ def load_profile():
 
 
 def alert_key(df):
+    if df.empty:
+        return pd.Series([], dtype=object)
     t = df["time"].astype(str).where(~df["rule"].isin(ONCE), "")
-    return df["code"].astype(str) + "|" + df["rule"] + "|" + df["level"] + "|" + t
+    parts = [df["code"], df["rule"], df["level"], t]
+    return pd.Series(["|".join(map(str, row)) for row in zip(*parts)], index=df.index)
 
 
-def make_snapshot(bars, uni, stats):
+def make_snapshot(bars, uni, stats, profile=None):
     b = bars.sort_values(["code", "time"])
     g = b.groupby("code")
     snap = g.agg(last_time=("time", "last"), open=("open", "first"), high=("high", "max"),
@@ -53,9 +62,9 @@ def make_snapshot(bars, uni, stats):
     snap["chg_5m_pct"] = (snap["price"] / snap["code"].map(ref) - 1) * 100
     snap["vcm_usage_pct"] = (snap["chg_5m_pct"].abs() / snap["vcm_pct"] * 100).where(snap["vcm_pct"].notna())
     snap["ma_dev_pct"] = (snap["price"] / snap["ma"] - 1) * 100
-    snap["vol_ratio"] = snap["cum_volume"] / (snap["avg_vol"] * minutes_elapsed(snap["last_time"]) / 330)
+    snap["vol_ratio"] = snap["cum_volume"] / expected_volume(snap["code"], snap["last_time"], profile, snap["avg_vol"])
     snap = snap.replace([np.inf, -np.inf], np.nan)
-    return snap.round({"open": 3, "high": 3, "low": 3, "price": 3, "ma": 3, "avg_vol": 0, "turnover_hkd": 0,
+    return snap.round({"open": 3, "high": 3, "low": 3, "price": 3, "ma": 3, "avg_vol": 0, "avg_turnover": 0, "turnover_hkd": 0,
                        "chg_pct": 2, "chg_5m_pct": 2, "vcm_usage_pct": 1, "ma_dev_pct": 2, "vol_ratio": 2})
 
 
@@ -79,8 +88,8 @@ def main(force=False):
         log.info(f"測試模式：使用 {today:%Y-%m-%d} 的行情")
 
     uni = load_universe()
-    stats, profile = load_stats(today), load_profile()
     cfg = load_yaml("rules.yaml")
+    stats, profile = load_stats(today, cfg), load_profile()
 
     raw = download(uni["yahoo"].tolist(), "1d", "1m", log)
     raw = raw[raw["time"].dt.normalize() == today]
@@ -92,7 +101,7 @@ def main(force=False):
 
     # ---- 快照 ----
     day = f"{today:%Y-%m-%d}"
-    snap = make_snapshot(bars, uni, stats)
+    snap = make_snapshot(bars, uni, stats, profile)
     snap.to_parquet(path("snapshot", day, f"snapshot_{stamp}.parquet"), index=False)
 
     # ---- 監控規則 ----

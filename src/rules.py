@@ -42,6 +42,32 @@ def bucket(t):
     return (b // 60).astype(int).astype(str).str.zfill(2) + (b % 60).astype(int).astype(str).str.zfill(2)
 
 
+def expected_volume(codes, times, profile, avg_vol):
+    """到某時點為止的「正常累計成交量」
+    有 profile（由 1 分鐘資料累積的各時段均量）時，依時段加總，反映開收盤量大、午盤量小的分佈；
+    沒有時退回 20 日均量 × 已交易時間比例。兩者來源一致才可比（Yahoo 1 分鐘量加總與日線量常不一致）。"""
+    codes, times = pd.Series(codes).reset_index(drop=True), pd.Series(times).reset_index(drop=True)
+    fallback = pd.Series(avg_vol).reset_index(drop=True) * minutes_elapsed(times).values / 330
+    if profile is None or profile.empty:
+        return fallback.values
+    pv = profile.pivot_table(index="code", columns="bucket", values="vol_per_min", aggfunc="sum").fillna(0) * 30
+    pv = pv.reindex(columns=sorted(pv.columns))
+    cum = pv.cumsum(axis=1)
+    cur_b = bucket(times)
+    m = tod(times).dt.total_seconds() / 60
+    frac = ((m % 30) + 1) / 30
+    out = []
+    for c, b, f in zip(codes, cur_b, frac):
+        if c not in pv.index or b not in pv.columns:
+            out.append(np.nan)
+            continue
+        i = pv.columns.get_loc(b)
+        before = cum.loc[c].iat[i - 1] if i > 0 else 0.0
+        out.append(before + pv.loc[c].iat[i] * min(f, 1.0))
+    exp = pd.Series(out, dtype=float)
+    return exp.where(exp > 0).fillna(fallback).values
+
+
 def emit(df, mask, rule, levels, value, detail):
     """把符合條件的列轉成警報表"""
     lv = np.asarray(levels, dtype=object)
@@ -70,9 +96,11 @@ def run_rules(bars, stats, universe, cfg, profile=None, daily_close=None):
     b["base_min"] = b["vol_per_min"].fillna(b["avg_vol"] / 330).replace(0, np.nan)
     g = b.groupby("code", sort=False)
 
-    # ---- 冷門股過濾（當日成交額過低者不做短時指標）----
+    # ---- 冷門股過濾（當日成交額過低者不做短時指標）；活躍股 = 20 日平均成交額達門檻 ----
     b["turnover_hkd"] = (b["close"] * b["volume"]).groupby(b["code"]).transform("sum")
     liquid = b["turnover_hkd"] >= cfg["min_turnover_hkd"]
+    avg_to = b["avg_turnover"] if "avg_turnover" in b else pd.Series(np.inf, index=b.index)
+    active = liquid & (avg_to >= cfg["active_min_avg_turnover_hkd"])
 
     # ---- 1. 1 分鐘急漲急跌（對上一筆成交分鐘）----
     chg1 = (b["close"] / g["close"].shift(1) - 1) * 100
@@ -104,7 +132,7 @@ def run_rules(bars, stats, universe, cfg, profile=None, daily_close=None):
     bt = b.set_index("time")
     vol3 = bt.groupby("code", sort=False)["volume"].rolling("3min").sum().values
     r3 = vol3 / (3 * b["base_min"])
-    out.append(emit(b, liquid, "3分鐘量暴增", grade(r3, cfg["vol_3m"]), r3, "3 分鐘量 / 同時段均量"))
+    out.append(emit(b, active, "3分鐘量暴增", grade(r3, cfg["vol_3m"]), r3, "3 分鐘量 / 同時段均量"))
 
     n = cfg["vol_streak_minutes"]
     r1 = (b["volume"] / b["base_min"]).fillna(0)
@@ -112,7 +140,7 @@ def run_rules(bars, stats, universe, cfg, profile=None, daily_close=None):
     streak_min = bt.rolling(f"{n}min").min().values
     streak_cnt = bt.rolling(f"{n}min").count().values
     streak_lv = np.where(streak_cnt >= n, grade(streak_min, cfg["vol_streak"]), None)
-    out.append(emit(b, liquid, "連續放量", streak_lv, streak_min, f"連續 {n} 分鐘每分鐘量倍數"))
+    out.append(emit(b, active, "連續放量", streak_lv, streak_min, f"連續 {n} 分鐘每分鐘量倍數"))
 
     # ---- 4. 全日型指標（每檔取最後一筆）----
     g = b.groupby("code", sort=False)
@@ -126,9 +154,10 @@ def run_rules(bars, stats, universe, cfg, profile=None, daily_close=None):
     out.append(emit(last, chg.notna(), "即時漲跌幅", grade(chg, cfg["day_change"]), chg, "vs 前收"))
 
     madev = (px / last["ma"] - 1) * 100
-    out.append(emit(last, madev.notna(), "偏離均線", grade(madev, cfg["ma_dev"]), madev, f"vs MA{cfg['ma_days']}"))
+    last_active = (last["avg_turnover"] >= cfg["active_min_avg_turnover_hkd"]) if "avg_turnover" in last else True
+    out.append(emit(last, madev.notna() & last_active, "偏離均線", grade(madev, cfg["ma_dev"]), madev, f"vs MA{cfg['ma_days']}"))
 
-    vr = last["cum_vol"] / (last["avg_vol"] * last["elapsed"] / 330)
+    vr = last["cum_vol"] / expected_volume(last["code"], last["time"], profile, last["avg_vol"])
     out.append(emit(last, vr.notna() & np.isfinite(vr), "成交量暴增", grade(vr, cfg["vol_ratio"]), vr,
                     "累計量 / 同時點均量"))
 
