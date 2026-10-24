@@ -1,6 +1,7 @@
 """港股跨境交易監控 — Streamlit 儀表板
 讀取 repo 內 data/ 的盤中快照、警報與盤後報告（由 GitHub Actions 每 30 分鐘更新）。
 """
+import datetime as dt
 import json
 from pathlib import Path
 
@@ -8,6 +9,8 @@ import altair as alt
 import pandas as pd
 import streamlit as st
 import yaml
+
+from app_support import HKT, GitHub, ago, schedule_status
 
 ROOT = Path(__file__).resolve().parent
 DATA = ROOT / "data"
@@ -93,16 +96,86 @@ ALERT_COLS = {"time": "觸發時間", "code": "代碼", "name": "名稱", "等�
 # ---------- 側欄 ----------
 status = read_status()
 days = trade_days()
+try:
+    gh = GitHub(dict(st.secrets))
+except Exception:                     # 本機沒有 secrets.toml
+    gh = GitHub({})
+
+
+@st.fragment(run_every=60)
+def clock_panel():
+    """現在時間、前次/下次排程（每分鐘自動更新）。排程時間直接讀 repo 內 workflow 檔，GitHub 上改排程後頁面同步。"""
+    s = schedule_status()
+    now = s["now"]
+    st.markdown(f"**現在　{now:%m/%d %H:%M}**（台北/香港）")
+    run_at = status.get("run_at")
+    if run_at:
+        ra = dt.datetime.fromisoformat(run_at).replace(tzinfo=HKT)
+        st.caption(f"最近一次盤中抓取：{ra:%m/%d %H:%M}（{ago(ra, now)}前）")
+        st.caption(f"資料截至 {status.get('data_until', '-')}（Yahoo 延遲約 15 分鐘）；"
+                   f"取得 {status.get('stocks_ok', '-')} / {status.get('stocks_total', '-')} 檔")
+    if s["prev"]:
+        kind = "盤後" if s["prev"] in s["eod_set"] else "盤中"
+        st.caption(f"前次排程：{s['prev']:%m/%d %H:%M}（{kind}，已過 {ago(s['prev'], now)}）")
+    if s["next"]:
+        kind = "盤後" if s["next"] in s["eod_set"] else "盤中"
+        st.caption(f"下次排程：{s['next']:%m/%d %H:%M}（{kind}，還有 {ago(now, s['next']).lstrip('-')}）")
+    with st.expander("今日排程"):
+        if not s["intraday"] and not s["eod"]:
+            st.caption("今日無排程（週末）")
+        rows = [{"時間": f"{t:%H:%M}", "類型": "盤中", "狀態": "已過" if t <= now else "待執行"} for t in s["intraday"]]
+        rows += [{"時間": f"{t:%H:%M}", "類型": "盤後", "狀態": "已過" if t <= now else "待執行"} for t in s["eod"]]
+        if rows:
+            st.dataframe(pd.DataFrame(rows), hide_index=True, use_container_width=True)
+        st.caption("GitHub 排程可能延遲數分鐘到數十分鐘。排程時間取自 repo 的 .github/workflows，修改後此處自動同步。")
+
+
+def manual_run_panel():
+    st.markdown("**手動抓取盤中資料**")
+    if not gh.ready:
+        st.caption("尚未設定 GITHUB_TOKEN，無法從頁面啟動。")
+        return
+    try:
+        runs = gh.latest_runs("intraday.yml", 1)
+    except Exception as e:
+        runs = []
+        st.caption(f"讀取執行狀態失敗：{e}")
+    if runs:
+        r = runs[0]
+        t = dt.datetime.fromisoformat(r["created_at"].replace("Z", "+00:00")).astimezone(HKT)
+        state = {"queued": "排隊中", "in_progress": "執行中", "completed": "完成"}.get(r["status"], r["status"])
+        result = {"success": "成功", "failure": "失敗", "cancelled": "已取消"}.get(r.get("conclusion") or "", "")
+        st.caption(f"最近一次：{t:%m/%d %H:%M} {state}{('・' + result) if result else ''}"
+                   f"（{'排程' if r['event'] == 'schedule' else '手動'}）")
+        busy = r["status"] in ("queued", "in_progress")
+    else:
+        busy = False
+    force = st.checkbox("非交易時段也執行（測試用）", key="force_run")
+    pw = st.text_input("管理密碼", type="password", key="run_pw")
+    if st.button("立即抓取", disabled=busy, help="約 7 分鐘完成；完成後資料存回 GitHub，頁面約 1–2 分鐘內更新"):
+        if gh.password and pw != gh.password:
+            st.error("密碼錯誤")
+        else:
+            try:
+                gh.dispatch("intraday.yml", {"force": "true" if force else "false"})
+                st.success("已送出，約 7 分鐘後完成。")
+            except Exception as e:
+                st.error(f"啟動失敗：{e}")
+    if busy:
+        st.caption("目前已有一次執行中，完成後才能再啟動。")
+
+
 with st.sidebar:
     st.header("港股交易監控")
     if not days:
         st.warning("尚無資料。請在 GitHub Actions 執行「盤後批次」（勾選初始化），再執行「盤中監控」。")
         st.stop()
-    day = st.selectbox("交易日", days)
-    st.caption(f"最近一次執行：{status.get('run_at', '-')}")
-    st.caption(f"資料截至：{status.get('data_until', '-')}（Yahoo 延遲約 15 分鐘）")
-    st.caption(f"取得檔數：{status.get('stocks_ok', '-')} / {status.get('stocks_total', '-')}")
-    if st.button("重新整理"):
+    day = st.selectbox("交易日（盤中頁面）", days)
+    clock_panel()
+    st.divider()
+    manual_run_panel()
+    st.divider()
+    if st.button("重新整理資料"):
         st.cache_data.clear()
         st.rerun()
 
@@ -216,9 +289,19 @@ with tab_stock:
 # ---------- 盤後報告 ----------
 cfg_rules = yaml.safe_load((ROOT / "config" / "rules.yaml").read_text(encoding="utf-8"))
 with tab_eod:
-    rep = read_csv(DATA / "report" / f"eod_report_{ymd}.csv", dtype={"股票代碼": str})
+    rep_days = sorted((p.stem[-8:] for p in (DATA / "report").glob("eod_report_*.csv")), reverse=True)
+    if not rep_days:
+        st.info("尚無盤後報告（每個交易日 16:42 後產生；也可用 Actions「補跑歷史盤後報告」補前幾天）。")
+        rep = pd.DataFrame()
+    else:
+        fmt = lambda d: f"{d[:4]}-{d[4:6]}-{d[6:]}"
+        default = rep_days.index(ymd) if ymd in rep_days else 0
+        rc1, rc2 = st.columns([1, 3])
+        rep_day = rc1.selectbox("報告日期", rep_days, index=default, format_func=fmt, key="rep_day")
+        rc2.caption(f"共 {len(rep_days)} 個交易日的報告（{fmt(rep_days[-1])} ～ {fmt(rep_days[0])}），可回溯查詢。")
+        rep = read_csv(DATA / "report" / f"eod_report_{rep_day}.csv", dtype={"股票代碼": str})
     if rep.empty:
-        st.info("本日盤後報告尚未產生（每個交易日 16:42 後）。")
+        pass
     else:
         sd = cfg_rules.get("streak_days", 3)
         st.caption("收市後以全天 1 分鐘 K 線與收盤價重算全部規則（含收市競價異常）；每檔 × 每項監控取當日最高等級一列。"
@@ -358,21 +441,77 @@ OTHER_INFO = {
     "streak_days": ("趨勢追蹤：連續異常標的的連續天數", "交易日"),
 }
 
+RULE_NAME = {"day_change": "即時漲跌幅", "chg_1m": "1分鐘急漲急跌", "chg_5m": "5分鐘急漲急跌", "ma_dev": "偏離均線",
+             "open_gap": "開盤價異常", "cas_dev": "收市競價異常", "vol_ratio": "成交量暴增",
+             "vol_3m": "3分鐘量暴增", "vol_streak": "連續放量", "turnover": "換手率異常"}
+EXTRA_COOLDOWN = ["VCM觸發(模擬)", "VCM內部預警"]
+
+
+def num(v):
+    """整數就存整數"""
+    return int(v) if float(v).is_integer() else float(v)
+
+
+def save_params(changes, rule_edits, other_edits, cd_edits, action_edits, who, why):
+    """把修改寫回 GitHub：config/rules.yaml、config/actions.yaml（保留註解），並追加 config/param_log.csv"""
+    from ruamel.yaml import YAML
+    ry = YAML()
+    ry.preserve_quotes = True
+    ry.width = 4096
+    import io
+    stamp = dt.datetime.now(HKT)
+    msg = f"參數調整（{who}）：{why}"
+    shas = []
+    if rule_edits or other_edits or cd_edits:
+        text, sha = gh.get_file("config/rules.yaml")
+        doc = ry.load(text)
+        for key, lv, v in rule_edits:
+            doc[key][lv] = num(v)
+        for key, v in other_edits:
+            doc[key] = num(v)
+        for rule, v in cd_edits:
+            doc["cooldown_min"][rule] = num(v)
+        buf = io.StringIO()
+        ry.dump(doc, buf)
+        shas.append(gh.put_file("config/rules.yaml", buf.getvalue(), sha, msg))
+    if action_edits:
+        text, sha = gh.get_file("config/actions.yaml")
+        doc = ry.load(text)
+        for grp, lv, v in action_edits:
+            doc[grp][lv] = v
+        buf = io.StringIO()
+        ry.dump(doc, buf)
+        shas.append(gh.put_file("config/actions.yaml", buf.getvalue(), sha, msg))
+    text, sha = gh.get_file("config/param_log.csv")
+    if not text:
+        text = "\ufeff時間,修改人,參數,原值,新值,原因\n"
+    for item, old, new in changes:
+        text += f"{stamp:%Y-%m-%d %H:%M},{who},{item},{old},{new},{why.replace(',', '，')}\n"
+    gh.put_file("config/param_log.csv", text, sha, msg + "（紀錄）")
+    return shas
+
+
 with tab_param:
     cfg = yaml.safe_load((ROOT / "config" / "rules.yaml").read_text(encoding="utf-8"))
-    st.caption("黃 = 關注（記錄並通知風控）、橙 = 預警（通知主管並調查）、紅 = 嚴重（即時升級）。"
-               "修改請編輯 repo 的 config/rules.yaml，並登記於 Excel「參數調整日誌」。")
-    st.subheader("異常交易監控閾值")
+    acts = yaml.safe_load((ROOT / "config" / "actions.yaml").read_text(encoding="utf-8"))
     cd = cfg.get("cooldown_min", {})
+    st.caption("黃 = 關注（記錄並通知風控）、橙 = 預警（通知主管並調查）、紅 = 嚴重（即時升級）。"
+               "表格中欄名旁有筆形圖示的欄位可直接修改，修改後在最下方填寫修改人與原因，按「儲存到 GitHub」。"
+               "下一次排程執行即套用新參數，頁面約 1–2 分鐘後更新。")
+
+    st.subheader("異常交易監控閾值")
     rows = []
     for key, (name, unit, scope, src) in RULE_INFO.items():
         v = cfg.get(key, {})
-        rule_name = {"day_change": "即時漲跌幅", "chg_1m": "1分鐘急漲急跌", "chg_5m": "5分鐘急漲急跌", "ma_dev": "偏離均線",
-                     "open_gap": "開盤價異常", "cas_dev": "收市競價異常", "vol_ratio": "成交量暴增",
-                     "vol_3m": "3分鐘量暴增", "vol_streak": "連續放量", "turnover": "換手率異常"}[key]
-        rows.append({"類別": src, "監控項目": name, "黃": v.get("黃"), "橙": v.get("橙"), "紅": v.get("紅"),
-                     "單位": unit, "適用範圍": scope, "冷卻（分）": cd.get(rule_name)})
-    st.dataframe(pd.DataFrame(rows), hide_index=True, use_container_width=True)
+        rows.append({"鍵": key, "類別": src, "監控項目": name, "黃": v.get("黃"), "橙": v.get("橙"), "紅": v.get("紅"),
+                     "單位": unit, "適用範圍": scope, "冷卻（分）": cd.get(RULE_NAME[key])})
+    th_df = pd.DataFrame(rows)
+    th_new = st.data_editor(th_df, hide_index=True, use_container_width=True, key="ed_th",
+                            disabled=["鍵", "類別", "監控項目", "單位", "適用範圍"],
+                            column_config={"鍵": None, "黃": st.column_config.NumberColumn(min_value=0),
+                                           "橙": st.column_config.NumberColumn(min_value=0),
+                                           "紅": st.column_config.NumberColumn(min_value=0),
+                                           "冷卻（分）": st.column_config.NumberColumn(min_value=0, step=1)})
 
     st.subheader("VCM 參數")
     uni_f = ROOT / "config" / "universe.csv"
@@ -382,9 +521,75 @@ with tab_param:
         vrows = [{"觸發門檻": f"±{p:.0f}%", "內部預警": f"±{p * cfg['vcm_early_ratio']:.0f}%", "股票數": int(n)}
                  for p, n in vc.items()]
         st.dataframe(pd.DataFrame(vrows), hide_index=True, use_container_width=True)
-    st.caption("門檻取自 HKEX 每次公布的 VCM 證券名單（每日盤後自動更新）。不適用時段：早、午市首 15 分鐘，"
-               "午市最後 20 分鐘，開市前與收市競價時段；午市不沿用早市參考價；冷靜期 5 分鐘。")
+    st.caption("觸發門檻取自 HKEX 每次公布的 VCM 證券名單（每日盤後自動更新，不在此修改）；內部預警比例與冷卻時間可在下表修改。"
+               "不適用時段：早、午市首 15 分鐘，午市最後 20 分鐘，開市前與收市競價時段；午市不沿用早市參考價；冷靜期 5 分鐘。")
+    vcm_cd = pd.DataFrame([{"規則": r, "冷卻（分）": cd.get(r)} for r in EXTRA_COOLDOWN])
+    vcm_cd_new = st.data_editor(vcm_cd, hide_index=True, use_container_width=True, key="ed_vcmcd", disabled=["規則"])
 
     st.subheader("其他參數")
-    orows = [{"參數": desc, "設定值": cfg.get(k), "單位": unit, "設定鍵": k} for k, (desc, unit) in OTHER_INFO.items()]
-    st.dataframe(pd.DataFrame(orows), hide_index=True, use_container_width=True)
+    o_df = pd.DataFrame([{"鍵": k, "參數": d, "設定值": float(cfg.get(k)), "單位": unit} for k, (d, unit) in OTHER_INFO.items()])
+    o_new = st.data_editor(o_df, hide_index=True, use_container_width=True, key="ed_other",
+                           disabled=["鍵", "參數", "單位"], column_config={"鍵": None})
+
+    st.subheader("操作建議（盤後預警列表）")
+    a_df = pd.DataFrame([{"類別": g, "適用規則": "、".join(v["rules"]), "黃": v.get("黃"), "橙": v.get("橙"), "紅": v.get("紅")}
+                         for g, v in acts.items()])
+    a_new = st.data_editor(a_df, hide_index=True, use_container_width=True, key="ed_act", disabled=["類別", "適用規則"])
+
+    # ---- 比對差異 ----
+    changes, rule_edits, other_edits, cd_edits, action_edits, errors = [], [], [], [], [], []
+    for (_, o), (_, n) in zip(th_df.iterrows(), th_new.iterrows()):
+        for lv in ("黃", "橙", "紅"):
+            if pd.notna(n[lv]) and float(n[lv]) != float(o[lv]):
+                rule_edits.append((o["鍵"], lv, n[lv]))
+                changes.append((f"{o['監控項目']}・{lv}", o[lv], num(n[lv])))
+        if not (float(n["黃"]) <= float(n["橙"]) <= float(n["紅"])):
+            errors.append(f"{o['監控項目']}：需 黃 ≤ 橙 ≤ 紅")
+        if pd.notna(n["冷卻（分）"]) and float(n["冷卻（分）"]) != float(o["冷卻（分）"]):
+            cd_edits.append((RULE_NAME[o["鍵"]], n["冷卻（分）"]))
+            changes.append((f"{o['監控項目']}・冷卻", o["冷卻（分）"], num(n["冷卻（分）"])))
+    for (_, o), (_, n) in zip(vcm_cd.iterrows(), vcm_cd_new.iterrows()):
+        if pd.notna(n["冷卻（分）"]) and float(n["冷卻（分）"]) != float(o["冷卻（分）"]):
+            cd_edits.append((o["規則"], n["冷卻（分）"]))
+            changes.append((f"{o['規則']}・冷卻", o["冷卻（分）"], num(n["冷卻（分）"])))
+    for (_, o), (_, n) in zip(o_df.iterrows(), o_new.iterrows()):
+        if pd.notna(n["設定值"]) and float(n["設定值"]) != float(o["設定值"]):
+            other_edits.append((o["鍵"], n["設定值"]))
+            changes.append((o["參數"], num(o["設定值"]), num(n["設定值"])))
+    for (_, o), (_, n) in zip(a_df.iterrows(), a_new.iterrows()):
+        for lv in ("黃", "橙", "紅"):
+            if str(n[lv]) != str(o[lv]):
+                action_edits.append((o["類別"], lv, str(n[lv])))
+                changes.append((f"操作建議・{o['類別']}・{lv}", o[lv], n[lv]))
+
+    st.subheader("儲存修改")
+    if not changes:
+        st.caption("目前沒有修改。")
+    else:
+        st.dataframe(pd.DataFrame(changes, columns=["參數", "原值", "新值"]), hide_index=True, use_container_width=True)
+        for e in errors:
+            st.error(e)
+        if not gh.ready:
+            st.warning("尚未設定 GITHUB_TOKEN，無法寫回 GitHub。請在 Streamlit 的 Secrets 設定（見 README）。")
+        else:
+            c1, c2, c3 = st.columns([1, 2, 1])
+            who = c1.text_input("修改人")
+            why = c2.text_input("修改原因")
+            pw = c3.text_input("管理密碼", type="password", key="param_pw")
+            if st.button("儲存到 GitHub", type="primary", disabled=bool(errors)):
+                if not who or not why:
+                    st.error("請填寫修改人與修改原因")
+                elif gh.password and pw != gh.password:
+                    st.error("密碼錯誤")
+                else:
+                    try:
+                        save_params(changes, rule_edits, other_edits, cd_edits, action_edits, who, why)
+                        st.success("已寫回 GitHub。下一次排程執行即套用；頁面約 1–2 分鐘後顯示新值。")
+                    except Exception as e:
+                        st.error(f"寫回失敗：{e}")
+
+    log_f = ROOT / "config" / "param_log.csv"
+    if log_f.exists():
+        st.subheader("參數調整紀錄")
+        lg = pd.read_csv(log_f)
+        st.dataframe(lg.iloc[::-1], hide_index=True, use_container_width=True, height=h(len(lg), 300))

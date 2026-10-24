@@ -81,7 +81,21 @@ repo 容量：快照保留 30 天（`config/settings.yaml` 的 `keep_snapshot_da
 
 1. 到 [share.streamlit.io](https://share.streamlit.io) → New app → 選本 repo、分支 `main`、主程式 `streamlit_app.py`。
 2. App 設定中把可見範圍設為**僅受邀者**，並加入需要看的同仁（行情資料不可公開）。
-3. repo 每次有新 commit，Streamlit 會自動更新；頁面上的「重新整理」按鈕可清除快取。
+3. repo 每次有新 commit，Streamlit 會自動更新；頁面上的「重新整理資料」按鈕可清除快取。
+4. （選用）要在頁面上**修改參數並寫回 GitHub**、**手動啟動盤中抓取**，需設定 Secrets：
+   - 到 GitHub → Settings → Developer settings → Personal access tokens → **Fine-grained tokens** → Generate new token：
+     Resource owner 選 RMSecfb，Repository access 只選本 repo，Permissions 設 **Contents: Read and write**、**Actions: Read and write**。
+   - 到 Streamlit app → Settings → Secrets 貼上：
+     ```toml
+     GITHUB_TOKEN = "github_pat_..."
+     GITHUB_REPO = "RMSecfb/hk-cross-border-monitor"
+     ADMIN_PASSWORD = "自訂管理密碼"
+     ```
+   - 參數修改會寫回 `config/rules.yaml`、`config/actions.yaml`（保留註解），並在 `config/param_log.csv` 留下修改人、原值、新值、原因；
+     commit 紀錄即為完整軌跡。下一次排程執行即套用新參數。
+
+側欄顯示現在時間、最近一次盤中抓取、前次/下次排程與今日排程表。排程時間直接讀 `.github/workflows/*.yml`，
+在 GitHub 上修改 cron 後頁面自動同步。
 
 頁面：警報（可依等級/規則/代碼篩選）、VCM 監控（依 VCM 使用率排序）、市場排行、個股、盤後報告（預警列表）、
 趨勢追蹤（連續異常標的、風險變化排行、近 10 日上榜次數）、參數。
