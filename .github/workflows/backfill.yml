@@ -1,0 +1,37 @@
+name: 補跑歷史盤後報告
+on:
+  workflow_dispatch:
+    inputs:
+      start:
+        description: "起始日 YYYY-MM-DD（Yahoo 1 分鐘資料約保留 30 天）"
+        required: true
+      end:
+        description: "結束日 YYYY-MM-DD"
+        required: true
+      keep_profile:
+        description: "沿用現有分鐘量基準（不勾選＝依補跑日期重建）"
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+concurrency:
+  group: hk-data
+  cancel-in-progress: false
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements-pipeline.txt
+      - run: pip install -r requirements-pipeline.txt
+      - run: python src/backfill.py ${{ inputs.start }} ${{ inputs.end }} ${{ inputs.keep_profile && '--keep-profile' || '' }}
+      - name: 存回 repo
+        run: bash .github/commit.sh "backfill ${{ inputs.start }}~${{ inputs.end }}"

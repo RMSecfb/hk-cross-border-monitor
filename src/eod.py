@@ -15,6 +15,7 @@ import pandas as pd
 
 import universe
 from common import CONFIG, DATA, SETTINGS, download, get_logger, load_universe, load_yaml, now_hkt, path
+from report import write_reports
 from rules import apply_cooldown, bucket, run_rules
 
 log = get_logger("eod")
@@ -113,27 +114,34 @@ def main(init=False):
 
     # ---- 當日已收市：盤後全量重算 ----
     raw = download(uni["yahoo"].tolist(), "1d", "1m", log)
-    raw = raw[raw["time"].dt.normalize() == today]
-    bars = raw.merge(uni[["yahoo", "code"]], left_on="ticker", right_on="yahoo").drop(columns=["ticker", "yahoo"])
-    log.info(f"當日 1 分鐘 K 線：{bars['code'].nunique()} 檔、{len(bars)} 根")
+    eod_for_day(today, raw, daily, uni, cfg)
+    prune_snapshots(today)
 
-    prev_day = load_daily(today - pd.Timedelta(days=1), 1)["date"].max()
+
+def eod_for_day(day, raw, daily, uni, cfg):
+    """單一交易日的盤後計算（盤後批次與補跑共用）。daily 需含該日與之前的日線，且日線檔已存檔。"""
+    raw = raw[raw["time"].dt.normalize() == day]
+    bars = raw.merge(uni[["yahoo", "code"]], left_on="ticker", right_on="yahoo").drop(columns=["ticker", "yahoo"])
+    log.info(f"{day:%Y-%m-%d} 1 分鐘 K 線：{bars['code'].nunique()} 檔、{len(bars)} 根")
+
+    prev_day = load_daily(day - pd.Timedelta(days=1), 1)["date"].max()
     prev_f = path("stats", f"stats_{prev_day:%Y%m%d}.csv")
     prev_stats = pd.read_csv(prev_f) if prev_f.exists() else make_stats(cfg, prev_day)
     prof_f = path("profile", "profile.csv")
     prof = pd.read_csv(prof_f, dtype={"bucket": str}) if prof_f.exists() else None
-    close_today = daily[daily["date"] == today].set_index("code")["close"]
+    close_day = daily[daily["date"] == day].set_index("code")["close"]
 
-    alerts = apply_cooldown(run_rules(bars, prev_stats, uni, cfg, prof, daily_close=close_today), cfg["cooldown_min"])
-    alerts.to_csv(path("report", f"eod_alerts_{today:%Y%m%d}.csv"), index=False, encoding="utf-8-sig")
+    alerts = apply_cooldown(run_rules(bars, prev_stats, uni, cfg, prof, daily_close=close_day), cfg["cooldown_min"])
+    alerts.to_csv(path("report", f"eod_alerts_{day:%Y%m%d}.csv"), index=False, encoding="utf-8-sig")
     summary = alerts.pivot_table(index="rule", columns="level", values="code", aggfunc="count", fill_value=0)
-    summary.to_csv(path("report", f"eod_summary_{today:%Y%m%d}.csv"), encoding="utf-8-sig")
-    log.info(f"盤後警報 {len(alerts)} 筆")
+    summary.to_csv(path("report", f"eod_summary_{day:%Y%m%d}.csv"), encoding="utf-8-sig")
+    rep, score = write_reports(alerts, uni, cfg, day)
+    log.info(f"{day:%Y-%m-%d} 盤後警報 {len(alerts)} 筆，預警列表 {len(rep)} 列，"
+             f"上榜 {(score['score'] >= cfg['list_min_score']).sum()} 檔")
 
-    make_stats(cfg, today)
+    make_stats(cfg, day)
     if not bars.empty:
         update_profile(bars)
-    prune_snapshots(today)
 
 
 if __name__ == "__main__":

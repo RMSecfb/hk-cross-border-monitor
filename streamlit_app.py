@@ -66,6 +66,27 @@ def h(n, cap=560):
     return min(cap, 38 + 35 * max(n, 1))
 
 
+RED_RAMP = ["#fdecea", "#f9c4bd", "#f08c80", "#d9473a", "#8f1d14"]
+GREEN_RAMP = ["#e9f5ec", "#c3e6cb", "#7cc492", "#2f9a52", "#11622f"]
+
+
+def ramp_css(v, lo, hi, ramp):
+    """單一色相由淺到深；深色兩階改白字以維持對比"""
+    if pd.isna(v) or hi <= lo:
+        return ""
+    i = int(min(max((v - lo) / (hi - lo), 0), 0.999) * len(ramp))
+    return f"background-color:{ramp[i]};color:{'#ffffff' if i >= 3 else '#1f1f1f'}"
+
+
+@st.cache_data(ttl=120)
+def score_history(n=30):
+    """近 n 個交易日風險分數 → 長表 date, code, name, score, rules"""
+    files = sorted((DATA / "report").glob("score_*.csv"))[-n:]
+    if not files:
+        return pd.DataFrame()
+    return pd.concat([pd.read_csv(f).assign(date=f.stem[-8:]) for f in files], ignore_index=True)
+
+
 ALERT_COLS = {"time": "觸發時間", "code": "代碼", "name": "名稱", "等級": "等級", "rule": "規則",
               "value": "數值", "detail": "說明", "found_at": "發現批次"}
 
@@ -101,8 +122,8 @@ cnt = alerts_all["level"].value_counts() if not alerts_all.empty else pd.Series(
 for i, lv in enumerate(LEVELS):
     c[i + 2].metric(LEVEL_LABEL[lv], int(cnt.get(lv, 0)))
 
-tab_alert, tab_vcm, tab_rank, tab_stock, tab_eod, tab_param = st.tabs(
-    ["警報", "VCM 監控", "市場排行", "個股", "盤後報告", "參數"])
+tab_alert, tab_vcm, tab_rank, tab_stock, tab_eod, tab_trend, tab_param = st.tabs(
+    ["警報", "VCM 監控", "市場排行", "個股", "盤後報告", "趨勢追蹤", "參數"])
 
 # ---------- 警報 ----------
 with tab_alert:
@@ -193,28 +214,124 @@ with tab_stock:
                 st.dataframe(level_styler(a), hide_index=True, use_container_width=True)
 
 # ---------- 盤後報告 ----------
+cfg_rules = yaml.safe_load((ROOT / "config" / "rules.yaml").read_text(encoding="utf-8"))
 with tab_eod:
-    if eod.empty:
+    rep = read_csv(DATA / "report" / f"eod_report_{ymd}.csv", dtype={"股票代碼": str})
+    if rep.empty:
         st.info("本日盤後報告尚未產生（每個交易日 16:42 後）。")
     else:
-        st.caption("收市後以全天 1 分鐘 K 線與收盤價重算全部規則（含收市競價異常）。盤中批次若有漏跑或失敗，以本報告為準。")
-        k = st.columns(4)
-        k[0].metric("警報檔數", eod["code"].nunique())
-        ec = eod["level"].value_counts()
+        sd = cfg_rules.get("streak_days", 3)
+        st.caption("收市後以全天 1 分鐘 K 線與收盤價重算全部規則（含收市競價異常）；每檔 × 每項監控取當日最高等級一列。"
+                   f"「連續上榜」= 連續幾個交易日風險分數 ≥ {cfg_rules.get('list_min_score', 30)}，"
+                   f"達 {sd} 日以上以深色標示。盤中批次若有漏跑或失敗，以本報告為準。")
+        k = st.columns(5)
+        k[0].metric("預警檔數", rep["股票代碼"].nunique())
+        ec = rep["等級"].value_counts()
         for i, lv in enumerate(LEVELS):
             k[i + 1].metric(LEVEL_LABEL[lv], int(ec.get(lv, 0)))
-        summ = eod.pivot_table(index="rule", columns="level", values="code", aggfunc="count", fill_value=0)
-        summ = summ.reindex(columns=[l for l in LEVELS if l in summ.columns])
-        summ["合計"] = summ.sum(axis=1)
-        st.subheader("各規則警報數")
-        st.dataframe(summ.sort_values("合計", ascending=False).rename_axis("規則"), use_container_width=True)
-        st.subheader("警報明細")
-        rsel = st.multiselect("規則", sorted(eod["rule"].unique()), key="eod_rule")
-        e = eod[eod["rule"].isin(rsel)] if rsel else eod
-        e = e.assign(_o=e["level"].map({l: i for i, l in enumerate(LEVELS)})).sort_values(["_o", "time"])
-        e = style_levels(e)
-        e = e[[k for k in ALERT_COLS if k in e.columns]].rename(columns=ALERT_COLS)
-        st.dataframe(level_styler(e), hide_index=True, use_container_width=True, height=h(len(e), 480))
+        k[4].metric(f"連續上榜 ≥{sd} 日", rep.loc[rep["連續上榜(日)"] >= sd, "股票代碼"].nunique())
+
+        f1, f2, f3, f4 = st.columns([1, 2, 1, 1])
+        lv_sel = f1.multiselect("等級", LEVELS, default=LEVELS, key="rep_lv")
+        type_sel = f2.multiselect("監控類型", sorted(rep["監控類型"].unique()), key="rep_type")
+        min_streak = f3.number_input("連續上榜 ≥（日）", min_value=0, value=0, step=1)
+        kw = f4.text_input("代碼或名稱", key="rep_kw")
+        r = rep[rep["等級"].isin(lv_sel) & (rep["連續上榜(日)"] >= min_streak)]
+        if type_sel:
+            r = r[r["監控類型"].isin(type_sel)]
+        if kw:
+            r = r[r["股票代碼"].str.contains(kw) | r["股票名稱"].astype(str).str.contains(kw, case=False)]
+        st.subheader(f"預警列表（{len(r)} 列）")
+        sty = (r.style
+               .map(lambda v: LEVEL_STYLE.get(v, ""), subset=["等級"])
+               .map(lambda v: "background-color:#8f1d14;color:#ffffff;font-weight:600" if v >= sd
+                    else ("background-color:#f9c4bd" if v >= 2 else ""), subset=["連續上榜(日)"])
+               )
+        st.dataframe(sty, hide_index=True, use_container_width=True, height=h(len(r), 600), column_config={
+            "預警ID": st.column_config.TextColumn(width="small"), "時間": st.column_config.TextColumn(width="small"),
+            "等級": st.column_config.TextColumn(width="small"), "股票代碼": st.column_config.TextColumn("代碼", width="small"),
+            "當日觸發次數": st.column_config.NumberColumn("觸發次數", width="small"),
+            "風險分數": st.column_config.NumberColumn("分數", width="small", format="%d"),
+            "連續上榜(日)": st.column_config.NumberColumn("連續上榜", width="small"),
+            "近5日上榜(日)": st.column_config.NumberColumn("近5日上榜", width="small")})
+
+        with st.expander("各規則警報數"):
+            summ = rep.pivot_table(index="監控類型", columns="等級", values="預警ID", aggfunc="count", fill_value=0)
+            summ = summ.reindex(columns=[l for l in LEVELS if l in summ.columns])
+            summ["合計"] = summ.sum(axis=1)
+            st.dataframe(summ.sort_values("合計", ascending=False), use_container_width=True)
+
+# ---------- 趨勢追蹤 ----------
+with tab_trend:
+    hist = score_history()
+    if hist.empty:
+        st.info("尚無盤後風險分數。每個交易日盤後批次完成後累積；也可用 Actions「補跑歷史盤後報告」補前幾天。")
+    else:
+        dates = sorted(hist["date"].unique())
+        sd = cfg_rules.get("streak_days", 3)
+        th = cfg_rules.get("list_min_score", 30)
+        w = cfg_rules.get("score_weights", {})
+        fmt_d = lambda d: f"{d[:4]}-{d[4:6]}-{d[6:]}"
+        latest, base = dates[-1], (dates[-2] if len(dates) > 1 else None)
+        st.caption(f"資料範圍：最近 {len(dates)} 個交易日｜最新監控日：{fmt_d(latest)}｜比較基準日："
+                   f"{fmt_d(base) if base else '-'}｜連續 {sd} 日區間：{' / '.join(fmt_d(d) for d in dates[-sd:][::-1])}")
+        st.caption(f"風險分數 = 各監控項目當日最高等級加總（紅 {w.get('紅')}、橙 {w.get('橙')}、黃 {w.get('黃')}，上限 100）；"
+                   f"分數 ≥ {th} 視為上榜。")
+        wide = hist.pivot_table(index="code", columns="date", values="score", aggfunc="first")
+        names = hist.drop_duplicates("code", keep="last").set_index("code")["name"]
+        rules_latest = hist[hist["date"] == latest].set_index("code")["rules"]
+
+        st.subheader(f"連續異常標的（最近 {sd} 個交易日皆 ≥ {th}）")
+        if len(dates) < sd:
+            st.info(f"目前只有 {len(dates)} 個交易日的資料，滿 {sd} 日後顯示。")
+        else:
+            lastn = dates[-sd:]
+            hit = wide[lastn].fillna(0).ge(th).all(axis=1)
+            cont = wide.loc[hit, lastn[::-1]].copy()
+            cont.columns = ["最新分數"] + [f"前{i}日" for i in range(1, sd)]
+            cont["平均"] = cont.mean(axis=1).round(1)
+            on = wide.fillna(0).ge(th)
+            cont["連續上榜(日)"] = [next((i for i, x in enumerate(on.loc[c, ::-1]) if not x), len(dates)) for c in cont.index]
+            cont.insert(0, "名稱", names.reindex(cont.index))
+            cont["最新觸發項目"] = rules_latest.reindex(cont.index)
+            cont = cont.sort_values(["連續上榜(日)", "平均"], ascending=False).reset_index()
+            cont["code"] = cont["code"].map(lambda c: f"{int(c):05d}")
+            cont = cont.rename(columns={"code": "代碼"})
+            score_cols = ["最新分數"] + [f"前{i}日" for i in range(1, sd)]
+            st.caption(f"共 {len(cont)} 檔")
+            st.dataframe(cont.style.map(lambda v: ramp_css(v, th, 100, RED_RAMP), subset=score_cols)
+                         .format({c: "{:.0f}" for c in score_cols} | {"平均": "{:.1f}"}),
+                         hide_index=True, use_container_width=True, height=h(len(cont), 480))
+
+        st.subheader("風險變化排行")
+        if base is None:
+            st.info("需要至少兩個交易日的資料。")
+        else:
+            st.caption(f"個股風險分數在最新監控日（{fmt_d(latest)}）與比較基準日（{fmt_d(base)}）之間的變化。")
+            chg = pd.DataFrame({"名稱": names.reindex(wide.index),
+                                "分數變化": wide[latest].fillna(0) - wide[base].fillna(0),
+                                "最新分數": wide[latest].fillna(0)}).rename_axis("代碼").reset_index()
+            chg["代碼"] = chg["代碼"].map(lambda c: f"{int(c):05d}")
+            up, dn = st.columns(2)
+            top_up = chg[chg["分數變化"] > 0].nlargest(10, "分數變化")
+            top_dn = chg[chg["分數變化"] < 0].nsmallest(10, "分數變化")
+            up.markdown("**風險上升 TOP 10**")
+            up.dataframe(top_up.style.map(lambda v: ramp_css(v, 0, 100, RED_RAMP), subset=["分數變化"])
+                         .format({"分數變化": "{:+.0f}", "最新分數": "{:.0f}"}), hide_index=True, use_container_width=True)
+            dn.markdown("**風險下降 TOP 10**")
+            dn.dataframe(top_dn.style.map(lambda v: ramp_css(-v, 0, 100, GREEN_RAMP), subset=["分數變化"])
+                         .format({"分數變化": "{:+.0f}", "最新分數": "{:.0f}"}), hide_index=True, use_container_width=True)
+
+        st.subheader(f"近 {min(10, len(dates))} 日上榜次數最多")
+        recent = dates[-10:]
+        freq = pd.DataFrame({"名稱": names.reindex(wide.index),
+                             "上榜天數": wide[recent].fillna(0).ge(th).sum(axis=1),
+                             "平均分數": wide[recent].mean(axis=1).round(1),
+                             "最新分數": wide[latest]}).rename_axis("代碼").reset_index()
+        freq = freq[freq["上榜天數"] >= 2].sort_values(["上榜天數", "平均分數"], ascending=False).head(20)
+        freq["代碼"] = freq["代碼"].map(lambda c: f"{int(c):05d}")
+        st.dataframe(freq.style.format({"平均分數": "{:.1f}", "最新分數": "{:.0f}"}, na_rep="-"),
+                     hide_index=True, use_container_width=True)
 
 # ---------- 參數 ----------
 RULE_INFO = {  # 參數鍵: (監控項目, 單位, 適用範圍, Excel 出處)
@@ -237,6 +354,8 @@ OTHER_INFO = {
     "vol_streak_minutes": ("連續放量的連續分鐘數", "分鐘"),
     "min_profile_days": ("分鐘量基準至少累積天數", "交易日"),
     "vcm_early_ratio": ("VCM 內部預警比例（門檻的幾成）", "比例"),
+    "list_min_score": ("趨勢追蹤：風險分數達此值視為上榜", "分"),
+    "streak_days": ("趨勢追蹤：連續異常標的的連續天數", "交易日"),
 }
 
 with tab_param:

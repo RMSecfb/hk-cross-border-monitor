@@ -31,6 +31,7 @@ GitHub Actions（雲端，可連 Yahoo / HKEX）
 | 盤中監控 | 10:02、10:32、11:02、11:32、12:17、13:32、14:02、14:32、15:02、15:32、16:02 | 午休不跑；避開整點以減少 GitHub 排程延遲 |
 | 盤後批次 | 16:42 | 以收盤資料全量重算；盤中失敗時以盤後報告為準 |
 | 每週股本 | 週六 10:00 | 選用 |
+| 補跑歷史盤後報告 | 手動 | 補跑指定期間（Yahoo 1 分鐘資料約保留 30 天），同時重建分鐘量基準 |
 
 - 假期、颱風不需設定：程式以盈富基金（2800）當日有無行情判斷，無行情即結束。
 - GitHub 排程可能延遲數分鐘到數十分鐘，偶爾跳過一次；下一次執行會重抓全天資料，不會漏算。
@@ -45,7 +46,9 @@ GitHub Actions（雲端，可連 Yahoo / HKEX）
 | `snapshot/YYYY-MM-DD/snapshot_YYYYMMDD_HHMMSS.parquet` | 盤中每次 | 每檔一列：現價、前收、漲跌幅、5 分鐘漲跌、VCM 門檻與使用率、累計量、量比、偏離 MA、成交額 |
 | `alerts/alerts_new_YYYYMMDD_HHMMSS.csv` | 盤中每次（有新警報時） | 本次新增警報 |
 | `alerts/alerts_YYYYMMDD.csv` | 盤中每次 | 當日累計警報（`found_at` = 發現批次） |
-| `report/eod_alerts_YYYYMMDD.csv`、`eod_summary_YYYYMMDD.csv` | 盤後 | 以收盤資料重算的全日警報與統計 |
+| `report/eod_alerts_YYYYMMDD.csv`、`eod_summary_YYYYMMDD.csv` | 盤後 | 以收盤資料重算的全日警報（逐筆）與統計 |
+| `report/eod_report_YYYYMMDD.csv` | 盤後 | 預警列表（Excel 格式）：預警ID、時間、等級、代碼、名稱、監控類型、指標值、閾值、觸發次數、風險分數、連續上榜、近5日上榜、操作建議 |
+| `report/score_YYYYMMDD.csv` | 盤後 | 每檔每日風險分數、連續上榜天數（趨勢追蹤用） |
 | `daily/YYYY/daily_YYYYMMDD.parquet` | 盤後 | 日線（每天一檔，只新增不覆寫） |
 | `stats/stats_YYYYMMDD.csv` | 盤後 | 隔日盤中用的前收、MA、20 日均量、股本 |
 | `profile/profile.csv` | 盤後 | 各 30 分鐘時段每分鐘均量（約近 20 日指數平均，供 3 分鐘量暴增、連續放量） |
@@ -80,7 +83,11 @@ repo 容量：快照保留 30 天（`config/settings.yaml` 的 `keep_snapshot_da
 2. App 設定中把可見範圍設為**僅受邀者**，並加入需要看的同仁（行情資料不可公開）。
 3. repo 每次有新 commit，Streamlit 會自動更新；頁面上的「重新整理」按鈕可清除快取。
 
-頁面：警報（可依等級/規則/代碼篩選）、VCM 監控（依 VCM 使用率排序）、市場排行、個股、盤後報告、參數。
+頁面：警報（可依等級/規則/代碼篩選）、VCM 監控（依 VCM 使用率排序）、市場排行、個股、盤後報告（預警列表）、
+趨勢追蹤（連續異常標的、風險變化排行、近 10 日上榜次數）、參數。
+
+風險分數 = 各監控項目當日最高等級加總（紅 40、橙 25、黃 10，上限 100），分數 ≥ 30 視為上榜；
+操作建議依規則類別 × 等級設定於 `config/actions.yaml`。
 
 ## 六、公司電腦取用資料
 

@@ -68,8 +68,8 @@ def _to_long(raw, tickers):
     return long[["ticker", "time", "open", "high", "low", "close", "volume"]]
 
 
-def download(tickers, period, interval, logger=None):
-    """分批下載，失敗自動重試；回傳長表"""
+def download(tickers, period, interval, logger=None, start=None, end=None):
+    """分批下載，失敗自動重試；回傳長表。指定 start/end（YYYY-MM-DD）時忽略 period"""
     import yfinance as yf
     size, pause, retry = SETTINGS["batch_size"], SETTINGS["batch_sleep_sec"], SETTINGS["max_retry"]
     out = []
@@ -77,8 +77,9 @@ def download(tickers, period, interval, logger=None):
         batch = tickers[i:i + size]
         for attempt in range(1, retry + 1):
             try:
-                raw = yf.download(batch, period=period, interval=interval, group_by="ticker",
-                                  auto_adjust=False, progress=False, threads=True)
+                when = {"start": start, "end": end} if start else {"period": period}
+                raw = yf.download(batch, interval=interval, group_by="ticker",
+                                  auto_adjust=False, progress=False, threads=True, **when)
                 out.append(_to_long(raw, batch))
                 break
             except Exception as e:  # 包含 Yahoo 限流
