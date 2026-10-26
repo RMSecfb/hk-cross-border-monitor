@@ -11,6 +11,7 @@ on:
 
 permissions:
   contents: write
+  actions: read             # 讀取執行紀錄，判斷同一時段是否已跑過
 
 concurrency:
   group: hk-data
@@ -21,13 +22,42 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - name: 這個時段已跑過就略過（只限 GitHub 定時排程）
+        id: gate
+        # Cloudflare 會在排定時間準時觸發；GitHub 排程常晚到，晚到時若同一時段已有成功的盤後批次就不再重跑，節省私有 repo 的 Actions 分鐘數。
+        # 手動執行與 Cloudflare 觸發（workflow_dispatch）不受影響。
+        if: github.event_name == 'schedule'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SLOTS: "16:42"   # 香港／台北時間，需與上方 cron 一致
+        run: |
+          now=$(TZ=Asia/Hong_Kong date +%H:%M)
+          today=$(TZ=Asia/Hong_Kong date +%F)
+          slot=""
+          for s in $SLOTS; do [[ "$s" > "$now" ]] || slot=$s; done
+          if [ -z "$slot" ]; then echo "skip=false" >> "$GITHUB_OUTPUT"; exit 0; fi
+          since=$(date -u -d "TZ=\"Asia/Hong_Kong\" $today $slot" +%Y-%m-%dT%H:%M:%SZ)
+          done_runs=$(gh api "repos/$GITHUB_REPOSITORY/actions/workflows/eod.yml/runs?created=>=$since&per_page=50" \
+            --jq "[.workflow_runs[] | select(.id != $GITHUB_RUN_ID and .conclusion == \"success\")] | length") || done_runs=0
+          if [ "${done_runs:-0}" -gt 0 ]; then
+            echo "::notice::盤後批次 $slot 時段已有成功執行，本次排程略過"
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "盤後批次 $slot 時段尚未執行，照常執行"
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+      - if: steps.gate.outputs.skip != 'true'
+        uses: actions/checkout@v4
+      - if: steps.gate.outputs.skip != 'true'
+        uses: actions/setup-python@v5
         with:
           python-version: "3.12"
           cache: pip
           cache-dependency-path: requirements-pipeline.txt
-      - run: pip install -r requirements-pipeline.txt
-      - run: python src/eod.py ${{ inputs.init && '--init' || '' }}
-      - name: 存回 repo
+      - if: steps.gate.outputs.skip != 'true'
+        run: pip install -r requirements-pipeline.txt
+      - if: steps.gate.outputs.skip != 'true'
+        run: python src/eod.py ${{ inputs.init && '--init' || '' }}
+      - if: steps.gate.outputs.skip != 'true'
+        name: 存回 repo
         run: bash .github/commit.sh "eod"
