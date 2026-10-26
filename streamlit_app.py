@@ -386,9 +386,47 @@ def _groq_summary(alerts_df, snap_df, is_eod, rep_day_str, groq_key, until_str="
         return f"（AI 摘要失敗：{e}）\n\n" + _rule_summary(alerts_df, snap_df, is_eod, rep_day_str, until_str), None
 
 
-def summary_panel(alerts_df, snap_df, is_eod=False, rep_day_str="", day_key="", until_str=""):
+AI_DIR = DATA / "ai_summary"      # 每個資料時點一檔：data/ai_summary/YYYYMMDD/HHMM.json（盤後為 eod.json）
+
+
+def _ai_label(key):
+    return "盤後報告" if key == "eod" else (f"資料至 {key[:2]}:{key[2:]}" if len(key) == 4 and key.isdigit() else key)
+
+
+def load_ai(day, key):
+    """讀已存的 AI 分析；先看本次工作階段剛存的（GitHub 檔案要 1–2 分鐘才會同步到頁面）"""
+    j = st.session_state.get(f"ai_saved_{day}_{key}")
+    if j:
+        return j
+    f = AI_DIR / day / f"{key}.json"
+    try:
+        return json.loads(f.read_text(encoding="utf-8")) if f.exists() else None
+    except Exception:
+        return None
+
+
+def list_ai(day):
+    keys = {f.stem for f in (AI_DIR / day).glob("*.json")} if (AI_DIR / day).exists() else set()
+    keys |= {k[len(f"ai_saved_{day}_"):] for k in st.session_state if k.startswith(f"ai_saved_{day}_")}
+    return [(k, load_ai(day, k)) for k in sorted(keys) if load_ai(day, k)]
+
+
+def save_ai(day, key, text, model):
+    """存回 GitHub；同一資料時點再分析會覆蓋（提交紀錄保留舊版）"""
+    meta = {"day": day, "key": key, "text": text, "model": model,
+            "created_at": f"{dt.datetime.now(HKT):%Y-%m-%d %H:%M}"}
+    path = f"data/ai_summary/{day}/{key}.json"
+    _, sha = gh.get_file(path)
+    gh.put_file(path, json.dumps(meta, ensure_ascii=False, indent=1), sha, f"AI 分析 {day} {_ai_label(key)}")
+    st.session_state[f"ai_saved_{day}_{key}"] = meta
+    return meta
+
+
+def summary_panel(alerts_df, snap_df, is_eod=False, rep_day_str="", day_key="", until_str="",
+                  ai_day="", ai_key=""):
     """監控摘要區塊（表格上方）。回傳目前顯示的摘要文字，供匯出報告沿用。
-    盤中與盤後各自獨立存放，切換頁籤不會互相覆蓋。"""
+    盤中與盤後各自獨立存放，切換頁籤不會互相覆蓋。
+    ai_day／ai_key：AI 分析的存檔位置（交易日、資料時點）；每個資料時點只留最後一次。"""
     try:                               # 未設定 secrets.toml 時 st.secrets 會丟例外
         groq_key = st.secrets.get("GROQ_API_KEY", "") or ""
     except Exception:
@@ -397,33 +435,66 @@ def summary_panel(alerts_df, snap_df, is_eod=False, rep_day_str="", day_key="", 
     kind = "eod" if is_eod else "intraday"
     k_txt, k_ai, k_day, k_model = (f"sum_txt_{kind}", f"sum_ai_{kind}",
                                    f"sum_day_{kind}", f"sum_model_{kind}")
+    k_meta, k_warn = f"sum_meta_{kind}", f"sum_warn_{kind}"
     label = "盤後監控摘要" if is_eod else "盤中監控摘要"
+    can_store = bool(ai_day and ai_key and ai_key != "-")
+    saved = load_ai(ai_day, ai_key) if can_store else None
 
     with st.container(border=True):
         st.markdown(f"**📋 {label}**")
-        if st.session_state.get(k_day) != day_key:       # 換日期就回到規則摘要
-            st.session_state[k_txt] = _rule_summary(alerts_df, snap_df, is_eod, rep_day_str, until_str)
+        if st.session_state.get(k_day) != day_key:       # 換日期或資料時點：有存檔就顯示 AI 分析，否則規則摘要
+            if saved:
+                st.session_state[k_txt], st.session_state[k_ai] = saved["text"], True
+                st.session_state[k_model], st.session_state[k_meta] = saved.get("model"), saved
+            else:
+                st.session_state[k_txt] = _rule_summary(alerts_df, snap_df, is_eod, rep_day_str, until_str)
+                st.session_state[k_ai], st.session_state[k_meta] = False, None
             st.session_state[k_day] = day_key
-            st.session_state[k_ai] = False
+            st.session_state[k_warn] = ""
 
         col1, col2 = st.columns([5, 1])
         with col1:
             st.markdown(st.session_state.get(k_txt, ""))
             if st.session_state.get(k_ai):
-                st.caption(f"🤖 由 Groq AI 生成（模型 {st.session_state.get(k_model, '-')}）")
+                meta = st.session_state.get(k_meta)
+                when = f"・{_ai_label(ai_key)}・產生於 {meta['created_at']}" if meta and can_store else ""
+                st.caption(f"🤖 由 Groq AI 生成（模型 {st.session_state.get(k_model, '-')}）{when}")
+            if st.session_state.get(k_warn):
+                st.warning(st.session_state[k_warn])
         with col2:
-            if groq_key and st.button("🤖 AI 分析", key=f"ai_btn_{kind}",
-                                      help="使用 Groq AI 生成深度分析摘要"):
+            again = bool(saved) or bool(st.session_state.get(k_ai))
+            if groq_key and st.button("🔄 重新分析" if again else "🤖 AI 分析", key=f"ai_btn_{kind}",
+                                      help="使用 Groq AI 生成深度分析摘要；同一資料時點只保留最後一次"):
                 with st.spinner("AI 分析中…"):
                     txt_ai, used = _groq_summary(alerts_df, snap_df, is_eod, rep_day_str, groq_key, until_str)
                 st.session_state[k_txt] = txt_ai
                 st.session_state[k_ai] = bool(used)
                 st.session_state[k_model] = used
+                st.session_state[k_meta], st.session_state[k_warn] = None, ""
+                if used and can_store:
+                    if gh.ready:
+                        try:
+                            st.session_state[k_meta] = save_ai(ai_day, ai_key, txt_ai, used)
+                        except Exception as e:
+                            st.session_state[k_warn] = f"AI 分析已產生，但儲存失敗：{e}"
+                    else:
+                        st.session_state[k_warn] = "尚未設定 GITHUB_TOKEN，這次 AI 分析沒有儲存。"
                 st.rerun()
             if st.session_state.get(k_ai) and st.button("↩ 規則摘要", key=f"rule_btn_{kind}"):
                 st.session_state[k_txt] = _rule_summary(alerts_df, snap_df, is_eod, rep_day_str, until_str)
                 st.session_state[k_ai] = False
                 st.rerun()
+
+        if can_store:                                      # 回頭查：當日其他時點的 AI 分析
+            others = [(k, j) for k, j in list_ai(ai_day) if k != ai_key]
+            if others:
+                with st.expander(f"當日其他時點的 AI 分析（{len(others)}）"):
+                    keys = [k for k, _ in others]
+                    pick = st.selectbox("資料時點", keys, index=len(keys) - 1, format_func=_ai_label,
+                                        key=f"ai_pick_{kind}")
+                    j = dict(others)[pick]
+                    st.markdown(j["text"])
+                    st.caption(f"🤖 模型 {j.get('model', '-')}・產生於 {j.get('created_at', '-')}")
     return st.session_state.get(k_txt, "")
 
 
@@ -529,8 +600,8 @@ tab_alert, tab_vcm, tab_rank, tab_stock, tab_eod, tab_trend, tab_param = st.tabs
 
 # ---------- 警報 ----------
 with tab_alert:
-    sum_intraday = summary_panel(alerts_all, snap, is_eod=False, rep_day_str=day, day_key=ymd,
-                                 until_str=until)
+    sum_intraday = summary_panel(alerts_all, snap, is_eod=False, rep_day_str=day, day_key=f"{ymd}_{until}",
+                                 until_str=until, ai_day=ymd, ai_key=until.replace(":", ""))
     if alerts_all.empty:
         st.info("本日尚無警報。")
     else:
@@ -681,7 +752,8 @@ with tab_eod:
             rep_alerts_for_summary = rep.rename(columns={"等級": "level", "股票代碼": "code", "股票名稱": "name",
                                                           "監控類型": "rule"})
         sum_eod = summary_panel(rep_alerts_for_summary, pd.DataFrame(), is_eod=True,
-                                rep_day_str=fmt(rep_day), day_key=rep_day)
+                                rep_day_str=fmt(rep_day), day_key=rep_day,
+                                ai_day=rep_day, ai_key="eod")
 
         st.caption("收市後以全天 1 分鐘 K 線與收盤價重算全部規則（含收市競價異常）；每檔 × 每項監控取當日最高等級一列。"
                    f"「連續上榜」= 連續幾個交易日風險分數 ≥ {cfg_rules.get('list_min_score', 30)}，"
