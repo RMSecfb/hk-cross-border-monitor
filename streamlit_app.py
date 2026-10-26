@@ -300,6 +300,59 @@ def pick_groq_model(groq_key):
     return None, f"帳號可用的模型中沒有對話模型：{', '.join(avail[:8])}"
 
 
+AI_MAX_TOKENS = 450      # 輸出上限；輸入約 700–900 tokens，合計每次按鈕約 1,500 tokens
+
+
+def _groq_payload(model, prompt):
+    body = {"model": model, "messages": [{"role": "user", "content": prompt}],
+            "max_tokens": AI_MAX_TOKENS, "temperature": 0.3}
+    if model.startswith("openai/gpt-oss"):   # 推理模型：思考也算輸出 tokens，調低避免內容被截斷
+        body["reasoning_effort"] = "low"
+        body["max_tokens"] = AI_MAX_TOKENS + 450
+    return body
+
+
+def _fmt_code(c):
+    try:
+        return f"{int(c):05d}"
+    except (TypeError, ValueError):
+        return str(c)
+
+
+def _ai_facts(alerts_df, snap_df):
+    """整理給 AI 的資料（精簡文字，控制 token 用量）"""
+    lines = []
+    df = alerts_df
+    if not df.empty and "level" in df.columns:
+        cnt = df["level"].value_counts()
+        n_codes = df["code"].nunique() if "code" in df.columns else 0
+        lines.append(f"警報筆數：紅{int(cnt.get('紅', 0))}、橙{int(cnt.get('橙', 0))}、黃{int(cnt.get('黃', 0))}；觸發檔數{n_codes}")
+        if "rule" in df.columns:
+            for lv in ("紅", "橙"):
+                sub = df[df["level"] == lv]
+                if not sub.empty:
+                    top = sub.groupby("rule").size().nlargest(3)
+                    lines.append(f"{lv}燈前三規則：" + "、".join(f"{r}{n}筆" for r, n in top.items()))
+            if "detail" in df.columns:
+                det = df.groupby("rule")["detail"].first()
+                top_rules = df.groupby("rule").size().nlargest(4).index
+                lines.append("數值意義：" + "；".join(f"{r}＝{det[r]}" for r in top_rules))
+        if {"code", "name", "rule"} <= set(df.columns):
+            g = df.groupby(["code", "name"]).agg(
+                n=("rule", "size"), kinds=("rule", "nunique"),
+                red=("level", lambda x: int((x == "紅").sum()))).reset_index()
+            g = g.sort_values(["red", "kinds", "n"], ascending=False).head(6)
+            lines.append("重點標的（紅燈筆數／觸發規則種類／總筆數）：" + "；".join(
+                f"{r['name']}({_fmt_code(r['code'])}) 紅{r['red']}／{r['kinds']}種／{r['n']}筆" for _, r in g.iterrows()))
+            multi = int((df.groupby("code")["rule"].nunique() >= 3).sum())
+            lines.append(f"同時觸發3種以上規則的標的：{multi}檔")
+    if not snap_df.empty and "chg_pct" in snap_df.columns:
+        chg = snap_df["chg_pct"].dropna()
+        up, dn = int((chg > 0).sum()), int((chg < 0).sum())
+        lines.append(f"全市場：上漲{up}檔、下跌{dn}檔、平盤{len(chg) - up - dn}檔，漲跌幅中位數{chg.median():.2f}%")
+    return "\n".join(lines) if lines else "（無警報資料）"
+
+
 def _groq_summary(alerts_df, snap_df, is_eod, rep_day_str, groq_key, until_str=""):
     """用 Groq API 生成摘要（按鈕觸發）"""
     try:
@@ -307,29 +360,13 @@ def _groq_summary(alerts_df, snap_df, is_eod, rep_day_str, groq_key, until_str="
         time_str = rep_day_str if is_eod else (until_str or "-")
         src_str = "盤後報告" if is_eod else "盤中監控"
 
-        # 準備統計數字
-        stats = {}
-        if not alerts_df.empty and "level" in alerts_df.columns:
-            stats["red"] = int((alerts_df["level"] == "紅").sum())
-            stats["orange"] = int((alerts_df["level"] == "橙").sum())
-            stats["yellow"] = int((alerts_df["level"] == "黃").sum())
-            stats["stocks"] = int(alerts_df["code"].nunique()) if "code" in alerts_df.columns else 0
-            if "rule" in alerts_df.columns:
-                top3 = alerts_df.groupby("rule").size().nlargest(3).to_dict()
-                stats["top_rules"] = top3
-            if "code" in alerts_df.columns and "name" in alerts_df.columns:
-                red_df = alerts_df[alerts_df["level"] == "紅"][["code", "name"]].drop_duplicates().head(5)
-                stats["red_stocks"] = [f"{row['name']}（{int(row['code']):05d}）" for _, row in red_df.iterrows()]
-        if not snap_df.empty and "chg_pct" in snap_df.columns:
-            stats["market_up"] = int((snap_df["chg_pct"] > 0).sum())
-            stats["market_down"] = int((snap_df["chg_pct"] < 0).sum())
+        facts = _ai_facts(alerts_df, snap_df)
 
-        prompt = f"""你是港股跨境交易監控系統的風險分析師。請根據以下{src_str}統計數字，以繁體中文撰寫一段監控摘要（150字以內），重點說明異常情況、主要風險集中在哪些規則或標的，以及需要關注的事項。語氣專業簡潔。
+        prompt = f"""你是港股跨境交易監控系統的風險分析師。請只根據下列{src_str}資料，以繁體中文寫一段約 250 字的監控摘要，依序說明：(1) 異常概況與嚴重程度；(2) 風險集中在哪些規則與標的；(3) 建議優先關注的事項。
+要求：只使用資料中出現的數字與名稱，不要推測原因、不要編造資料中沒有的內容；語氣專業簡潔；直接輸出段落，不加標題或編號。
 
 時間：{time_str}
-統計數字：{stats}
-
-請直接輸出摘要段落，不要加標題或編號。"""
+{facts}"""
 
         model, err = pick_groq_model(groq_key)
         if not model:
@@ -338,8 +375,7 @@ def _groq_summary(alerts_df, snap_df, is_eod, rep_day_str, groq_key, until_str="
         resp = req.post(
             f"{GROQ_API}/chat/completions",
             headers={"Authorization": f"Bearer {groq_key}", "Content-Type": "application/json"},
-            json={"model": model, "messages": [{"role": "user", "content": prompt}],
-                  "max_tokens": 300, "temperature": 0.3},
+            json=_groq_payload(model, prompt),
             timeout=30
         )
         if resp.status_code != 200:
