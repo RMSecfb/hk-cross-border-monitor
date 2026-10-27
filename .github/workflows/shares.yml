@@ -8,7 +8,10 @@ permissions:
   contents: write
 
 concurrency:
-  group: hk-data
+  # 刻意不與 hk-data 同群組：本工作要跑 1–2 小時，若與盤中／盤後批次共用群組，
+  # 手動在交易時段觸發會把當天所有盤中批次排隊卡住。
+  # 本工作只寫 config/shares.csv，與 data/ 無重疊，commit.sh 的 pull --rebase 重試足以處理同時推送。
+  group: hk-shares
   cancel-in-progress: false
 
 jobs:
