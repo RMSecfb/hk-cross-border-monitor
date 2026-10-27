@@ -15,6 +15,10 @@ COLS = ["time", "code", "rule", "level", "value", "detail"]
 AM, PM = (pd.Timedelta("9h30m"), pd.Timedelta("12h")), (pd.Timedelta("13h"), pd.Timedelta("16h"))
 VCM_AM, VCM_PM = (pd.Timedelta("9h45m"), pd.Timedelta("12h")), (pd.Timedelta("13h15m"), pd.Timedelta("15h40m"))
 
+# 規則分組：供「只加註不排除」的標記使用
+PRICE_RULES = ["即時漲跌幅", "開盤價異常", "1分鐘急漲急跌", "5分鐘急漲急跌", "偏離均線"]
+VOLUME_RULES = ["成交量暴增", "3分鐘量暴增", "連續放量", "換手率異常"]
+
 
 def grade(values, th):
     """依黃/橙/紅閾值（取絕對值）回傳等級，未達回傳 None"""
@@ -79,7 +83,7 @@ def emit(df, mask, rule, levels, value, detail):
                          "detail": detail})
 
 
-def run_rules(bars, stats, universe, cfg, profile=None, daily_close=None):
+def run_rules(bars, stats, universe, cfg, profile=None, daily_close=None, ex_div_codes=None):
     if bars.empty:
         return pd.DataFrame(columns=COLS + ["name"])
     b = bars.sort_values(["code", "time"]).reset_index(drop=True)
@@ -107,9 +111,19 @@ def run_rules(bars, stats, universe, cfg, profile=None, daily_close=None):
     avg_to = b["avg_turnover"] if "avg_turnover" in b else pd.Series(np.inf, index=b.index)
     active = liquid & (avg_to >= cfg["active_min_avg_turnover_hkd"])
 
+    # ---- 停牌排除：前一交易日成交量 0 且 OHLC 全同者，復牌跳空非交易異常 ----
+    # 全市場每日有 22–29% 的股票處於停牌狀態；實測 10/27 開盤價異常 226 檔中有 71 檔（31%）屬此類。
+    not_halted = ~b["halted"].fillna(False).astype(bool) if "halted" in b else pd.Series(True, index=b.index)
+    tradable = liquid & not_halted      # 價格類用：停牌排除
+    # 量能類（成交量暴增 / 3 分鐘量暴增 / 連續放量 / 換手率）不排除復牌股，改在 note 標記「復牌首日」
+
     # ---- 1. 1 分鐘急漲急跌（對上一筆成交分鐘）----
+    # 「上一根」未必是一分鐘前：冷門股可能隔數十分鐘才有下一筆成交，該漲跌幅實際涵蓋很長一段時間。
+    prev_t = g["time"].shift(1)
+    gap1_ok = (b["time"] - prev_t).dt.total_seconds().le(cfg.get("max_prev_gap_min", 3) * 60)
     chg1 = (b["close"] / g["close"].shift(1) - 1) * 100
-    out.append(emit(b, liquid, "1分鐘急漲急跌", grade(chg1, cfg["chg_1m"]), chg1, "vs 上一分鐘"))
+    out.append(emit(b, tradable & gap1_ok.fillna(False), "1分鐘急漲急跌",
+                    grade(chg1, cfg["chg_1m"]), chg1, "vs 上一分鐘"))
 
     # ---- 2. 5 分鐘急漲急跌 & VCM：參考價 = 5 分鐘前最後成交價（同一時段內）----
     ref = b[["code", "time", "close"]].rename(columns={"time": "ref_time", "close": "ref_px"})
@@ -122,8 +136,12 @@ def run_rules(bars, stats, universe, cfg, profile=None, daily_close=None):
     m = tod(b["time"])
     rt = tod(pd.Series(probe["rt"].values))
     same_session = ((m < AM[1]) | (rt.values >= PM[0])) & probe["rt"].notna().values  # 午市不沿用早市參考價
+    # 參考價距今過久者不計算（同 1 分鐘規則的理由）：找不到 5 分鐘前的價時會回退到更早的成交
+    gap5_ok = (b["time"] - pd.Series(probe["rt"].values)).dt.total_seconds().le(
+        (5 + cfg.get("max_prev_gap_min", 3)) * 60).fillna(False).values
     chg5 = (b["close"] / b["ref_px"] - 1) * 100
-    out.append(emit(b, liquid & same_session, "5分鐘急漲急跌", grade(chg5, cfg["chg_5m"]), chg5, "vs 5 分鐘前"))
+    out.append(emit(b, tradable & same_session & gap5_ok, "5分鐘急漲急跌",
+                    grade(chg5, cfg["chg_5m"]), chg5, "vs 5 分鐘前"))
 
     in_vcm = (((m >= VCM_AM[0]) & (m < VCM_AM[1])) | ((m >= VCM_PM[0]) & (m < VCM_PM[1]))) & \
              b["vcm_pct"].notna() & same_session
@@ -155,24 +173,39 @@ def run_rules(bars, stats, universe, cfg, profile=None, daily_close=None):
     last["elapsed"] = minutes_elapsed(last["time"]).values
     px = last["close"] if daily_close is None else last["code"].map(daily_close).fillna(last["close"])
 
+    # 全日型指標的過濾：流動性與停牌分開，各指標依其適用條件組合
+    last_liquid = last["turnover_hkd"] >= cfg["min_turnover_hkd"]
+    last_active = (last["avg_turnover"] >= cfg["active_min_avg_turnover_hkd"]) if "avg_turnover" in last \
+        else pd.Series(True, index=last.index)
+    last_not_halted = ~last["halted"].fillna(False).astype(bool) if "halted" in last \
+        else pd.Series(True, index=last.index)
+
     chg = (px / last["prev_close"] - 1) * 100
-    out.append(emit(last, chg.notna(), "即時漲跌幅", grade(chg, cfg["day_change"]), chg, "vs 前收"))
+    out.append(emit(last, chg.notna() & last_liquid & last_not_halted, "即時漲跌幅",
+                    grade(chg, cfg["day_change"]), chg, "vs 前收"))
 
     madev = (px / last["ma"] - 1) * 100
-    last_active = (last["avg_turnover"] >= cfg["active_min_avg_turnover_hkd"]) if "avg_turnover" in last else True
-    out.append(emit(last, madev.notna() & last_active, "偏離均線", grade(madev, cfg["ma_dev"]), madev, f"vs MA{cfg['ma_days']}"))
+    out.append(emit(last, madev.notna() & last_active & last_not_halted, "偏離均線",
+                    grade(madev, cfg["ma_dev"]), madev, f"vs MA{cfg['ma_days']}"))
 
     vr = last["cum_vol"] / expected_volume(last["code"], last["time"], profile, last["avg_vol"])
-    out.append(emit(last, vr.notna() & np.isfinite(vr), "成交量暴增", grade(vr, cfg["vol_ratio"]), vr,
-                    "累計量 / 同時點均量"))
+    out.append(emit(last, vr.notna() & np.isfinite(vr) & last_liquid, "成交量暴增",
+                    grade(vr, cfg["vol_ratio"]), vr, "累計量 / 同時點均量"))
 
     if "shares" in last and last["shares"].notna().any():
         tr = last["cum_vol"] / last["shares"] * 100
         out.append(emit(last, tr.notna(), "換手率異常", grade(tr, cfg["turnover"]), tr, "成交量 / 股本"))
 
-    gap = (first["open"] / first["prev_close"] - 1) * 100
+    # 開盤價異常：first 是「資料中的第一根 K 線」，對下午才首次成交的冷門股並非開盤價。
+    # 實測 10/27 的 230 筆中，真正在 09:30 開盤者僅 13%，下午才首次成交者達 42 筆
+    # （全日成交額中位數僅 1,310 元）。故限定第一根 K 線須落在開盤後數分鐘內。
     f = first.reset_index()
-    out.append(emit(f, gap.notna().values, "開盤價異常", grade(gap.values, cfg["open_gap"]), gap.values, "開盤 vs 前收"))
+    open_win = tod(f["time"]).le(AM[0] + pd.Timedelta(minutes=cfg.get("open_window_min", 5)))
+    f_liquid = f["turnover_hkd"] >= cfg["min_turnover_hkd"]
+    f_ok = open_win & f_liquid & (~f["halted"].fillna(False).astype(bool) if "halted" in f else True)
+    gap = (first["open"] / first["prev_close"] - 1) * 100
+    out.append(emit(f, (gap.notna().values & f_ok.values), "開盤價異常",
+                    grade(gap.values, cfg["open_gap"]), gap.values, "開盤 vs 前收"))
 
     # ---- 5. 收市競價（只在盤後提供 daily_close 時計算）----
     if daily_close is not None:
@@ -185,6 +218,24 @@ def run_rules(bars, stats, universe, cfg, profile=None, daily_close=None):
     alerts = pd.concat([o for o in out if not o.empty], ignore_index=True) if any(
         not o.empty for o in out) else pd.DataFrame(columns=COLS)
     alerts = alerts.merge(universe[["code", "name"]], on="code", how="left")
+    # ---- 標記：只加註、不改變判定，供人工判讀 ----
+    tags = []
+    # 除息：前收未還原權息，除息日股價自然下跌，價格類指標可能誤判
+    if ex_div_codes:
+        tags.append(("除息日",
+                     alerts["code"].isin(set(ex_div_codes)) & alerts["rule"].isin(PRICE_RULES)))
+    # 復牌首日：停牌期間 Yahoo 的成交量為 0，會把 20 日均量壓低，復牌當天的正常量除以被壓低的
+    # 基準，倍數自然失真（10/26 實測中位數 8 倍、最高 347 倍）。但復牌放量本身值得注意，
+    # 所以量能類只標記不排除；價格類的假跳空無判讀價值，已在各規則以 halted 排除。
+    if "halted" in stats:
+        halted_codes = set(stats.loc[stats["halted"].fillna(False).astype(bool), "code"])
+        if halted_codes:
+            tags.append(("復牌首日（倍數失真）",
+                         alerts["code"].isin(halted_codes) & alerts["rule"].isin(VOLUME_RULES)))
+    alerts["note"] = ""
+    for label, m in tags:
+        sep = np.where(alerts.loc[m, "note"] == "", "", "；")
+        alerts.loc[m, "note"] = alerts.loc[m, "note"] + sep + label
     return alerts.sort_values(["time", "code"]).reset_index(drop=True)
 
 

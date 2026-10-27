@@ -14,6 +14,9 @@ vol_streak_minutes: 15
 min_profile_days: 5         # 分鐘量基準至少累積幾個交易日後，才判斷 3 分鐘量暴增、連續放量
 turnover:    {黃: 15, 橙: 25, 紅: 40}   # 換手率 %（需 shares.csv）
 
+max_prev_gap_min: 3         # 1 分鐘／5 分鐘急漲急跌：參考價距今超過此分鐘數即不計算（避免把長時間跳空當成瞬間急漲）
+open_window_min: 5          # 開盤價異常：第一根 K 線須落在 09:30 後此分鐘數內，否則不視為開盤價
+
 ma_days: 20                 # 偏離均線用 MA 天數（5 / 10 / 20）
 vol_avg_days: 20            # 均量天數
 min_turnover_hkd: 1000000   # 當日成交額低於此值的冷門股，不做短時急漲急跌/量暴增（減少誤報）

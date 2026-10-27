@@ -91,7 +91,7 @@ def score_history(n=30):
 
 
 ALERT_COLS = {"time": "觸發時間", "code": "代碼", "name": "名稱", "等級": "等級", "rule": "規則",
-              "value": "數值", "detail": "說明", "found_at": "發現批次"}
+              "value": "數值", "detail": "說明", "note": "備註", "found_at": "發現批次"}
 
 # ---------- 側欄 ----------
 status = read_status()
@@ -526,6 +526,7 @@ def intraday_meta(alerts_df, snap_df, day_str, summary_text, until_label, run_at
         "監控類型": d["rule"],
         "指標值": pd.to_numeric(d["value"], errors="coerce").round(2).astype(str),
         "說明": d["detail"] if "detail" in d.columns else "",
+        "備註": d["note"] if "note" in d.columns else "",
     })
     det = det.sort_values(["等級", "時間"], key=lambda s: s.map(LEVEL_ORDER) if s.name == "等級" else s,
                           ascending=[True, False])
@@ -560,7 +561,7 @@ def eod_meta(rep, day_str, summary_text):
                 detail_note=f"完整明細共 {len(rep):,} 列（風險分數由高到低），"
                             "PDF 顯示前 200 列的重點欄位；完整欄位與全部列請看 Excel。",
                 pdf_cols=["股票代碼", "股票名稱", "等級", "監控類型", "指標值", "閾值",
-                          "風險分數", "連續上榜(日)"],
+                          "備註", "風險分數", "連續上榜(日)"],
                 pdf_rows=200)
 
 

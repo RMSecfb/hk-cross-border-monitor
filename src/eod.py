@@ -24,7 +24,7 @@ log = get_logger("eod")
 
 
 def fetch_daily(uni, period):
-    d = download(uni["yahoo"].tolist(), period, "1d", log)
+    d = download(uni["yahoo"].tolist(), period, "1d", log, actions=True)   # actions=True：取得股息，供除息日標記
     d = d.merge(uni[["yahoo", "code"]], left_on="ticker", right_on="yahoo").drop(columns=["ticker", "yahoo"])
     d["date"] = d["time"].dt.normalize()
     return d.drop(columns="time")
@@ -48,11 +48,20 @@ def make_stats(cfg, asof):
     d = load_daily(asof, SETTINGS["history_days"]).sort_values(["code", "date"])
     g = d.groupby("code")
     n_ma, n_vol = cfg["ma_days"], cfg["vol_avg_days"]
+    last = d.groupby("code").tail(1).set_index("code")
+    # 停牌判定：Yahoo 於停牌期間把 OHLC 全部填成最後價、成交量 0。
+    # 復牌當日與停牌期間的價格比較會產生巨大假跳空（實測 −57%～+88%），故價格類指標需排除。
+    halted = ((last["volume"] == 0) & (last["open"] == last["close"])
+              & (last["high"] == last["low"]) & (last["open"] == last["high"]))
     stats = pd.DataFrame({
         "prev_close": g["close"].last(),
         "ma": g["close"].apply(lambda s: s.tail(n_ma).mean() if len(s) >= n_ma else None),
         "avg_vol": g["volume"].apply(lambda s: s.tail(n_vol).mean()),
         "avg_turnover": (d["close"] * d["volume"]).groupby(d["code"]).apply(lambda s: s.tail(n_vol).mean()),
+        "halted": halted.astype(bool),
+        # ex_div 指「asof 當日」是否除息；盤後由 eod_for_day 直接從當日日線取得，
+        # 這裡保留供查核與盤中回溯使用（盤中無法預知當日除息，故盤中不做除息標記）
+        "ex_div": (last["dividends"] > 0) if "dividends" in last else False,
     }).reset_index()
     shares = CONFIG / "shares.csv"
     if shares.exists():
@@ -133,7 +142,12 @@ def eod_for_day(day, raw, daily, uni, cfg):
     prof = pd.read_csv(prof_f, dtype={"bucket": str}) if prof_f.exists() else None
     close_day = daily[daily["date"] == day].set_index("code")["close"]
 
-    alerts = apply_cooldown(run_rules(bars, prev_stats, uni, cfg, prof, daily_close=close_day), cfg["cooldown_min"])
+    today_row = daily[daily["date"] == day]
+    ex_div = set(today_row.loc[today_row["dividends"] > 0, "code"]) if "dividends" in today_row else set()
+    if ex_div:
+        log.info(f"{day:%Y-%m-%d} 除息股 {len(ex_div)} 檔，價格類警報將加註")
+    alerts = apply_cooldown(run_rules(bars, prev_stats, uni, cfg, prof, daily_close=close_day,
+                                      ex_div_codes=ex_div), cfg["cooldown_min"])
     alerts.to_csv(path("report", f"eod_alerts_{day:%Y%m%d}.csv"), index=False, encoding="utf-8-sig")
     summary = alerts.pivot_table(index="rule", columns="level", values="code", aggfunc="count", fill_value=0)
     summary.to_csv(path("report", f"eod_summary_{day:%Y%m%d}.csv"), encoding="utf-8-sig")

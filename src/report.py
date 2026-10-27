@@ -130,6 +130,7 @@ def build_report(alerts, uni, cfg, day, score):
         "監控類型": top["rule"],
         "指標值": [_value(r, v, cfg) for r, v in zip(top["rule"], top["value"])],
         "閾值": [_threshold(r, lv, cfg, p) for r, lv, p in zip(top["rule"], top["level"], top["vcm_pct"])],
+        "備註": top["note"].values if "note" in top else "",
         "當日觸發次數": top["觸發次數"].values,
         "風險分數": top["code"].map(sc).values,
         "連續上榜(日)": top["code"].map(ls["streak"]).fillna(0).astype(int).values,

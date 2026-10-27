@@ -65,11 +65,16 @@ def _to_long(raw, tickers):
     if t.dt.tz is not None:
         t = t.dt.tz_convert(HKT).dt.tz_localize(None)
     long["time"] = t
-    return long[["ticker", "time", "open", "high", "low", "close", "volume"]]
+    cols = ["ticker", "time", "open", "high", "low", "close", "volume"]
+    if "dividends" in long.columns:          # 日線加抓 actions 時才有：供除息日標記
+        long["dividends"] = pd.to_numeric(long["dividends"], errors="coerce").fillna(0)
+        cols.append("dividends")
+    return long[cols]
 
 
-def download(tickers, period, interval, logger=None, start=None, end=None):
-    """分批下載，失敗自動重試；回傳長表。指定 start/end（YYYY-MM-DD）時忽略 period"""
+def download(tickers, period, interval, logger=None, start=None, end=None, actions=False):
+    """分批下載，失敗自動重試；回傳長表。指定 start/end（YYYY-MM-DD）時忽略 period
+    actions=True 時一併取得股息（僅日線使用，供除息日標記）"""
     import yfinance as yf
     size, pause, retry = SETTINGS["batch_size"], SETTINGS["batch_sleep_sec"], SETTINGS["max_retry"]
     out = []
@@ -78,7 +83,7 @@ def download(tickers, period, interval, logger=None, start=None, end=None):
         for attempt in range(1, retry + 1):
             try:
                 when = {"start": start, "end": end} if start else {"period": period}
-                raw = yf.download(batch, interval=interval, group_by="ticker",
+                raw = yf.download(batch, interval=interval, group_by="ticker", actions=actions,
                                   auto_adjust=False, progress=False, threads=True, **when)
                 out.append(_to_long(raw, batch))
                 break
