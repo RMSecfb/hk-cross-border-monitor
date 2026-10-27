@@ -8,8 +8,12 @@ on:
       end:
         description: "結束日 YYYY-MM-DD"
         required: true
-      keep_profile:
-        description: "沿用現有分鐘量基準（不勾選＝依補跑日期重建）"
+      upload_bars:
+        description: "把補到的 1 分 K 上傳為 Release（供同時點分母累積歷史）"
+        type: boolean
+        default: true
+      rebuild_profile:
+        description: "重建分鐘量基準（危險：會先清空 profile.csv，只在它壞掉時才勾）"
         type: boolean
         default: false
 
@@ -17,13 +21,13 @@ permissions:
   contents: write
 
 concurrency:
-  group: hk-data
+  group: hk-data            # 與盤中／盤後共用：會寫 data/，不可同時執行
   cancel-in-progress: false
 
 jobs:
   run:
     runs-on: ubuntu-latest
-    timeout-minutes: 120
+    timeout-minutes: 300      # 一天約 5~6 分鐘（與盤中批次的下載量相同）
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -32,6 +36,35 @@ jobs:
           cache: pip
           cache-dependency-path: requirements-pipeline.txt
       - run: pip install -r requirements-pipeline.txt
-      - run: python src/backfill.py ${{ inputs.start }} ${{ inputs.end }} ${{ inputs.keep_profile && '--keep-profile' || '' }}
+      - run: |
+          python src/backfill.py ${{ inputs.start }} ${{ inputs.end }} \
+            ${{ inputs.rebuild_profile && '--rebuild-profile' || '' }}
+
+      # 只上傳 1 分 K，不上傳同時點基準（baseline）。
+      # 基準一旦上到 Release，下一次盤中批次就會改用新分母；留給當天的盤後批次統一重算後上傳，
+      # 才不會在盤中無預警切換公式。
+      - if: inputs.upload_bars
+        name: 上傳補到的 1 分 K 至 Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -e
+          n=0
+          for f in data/bars/bars_*.parquet; do
+            [ -e "$f" ] || continue
+            day=$(basename "$f" .parquet); day=${day#bars_}
+            tag="bars-$day"
+            if gh release view "$tag" >/dev/null 2>&1; then
+              gh release upload "$tag" "$f" --clobber
+            else
+              gh release create "$tag" "$f" --title "1 分 K $day" \
+                --notes "補跑產生，保留 30 天" --prerelease
+            fi
+            gh release view "$tag" --json assets --jq '.assets[].name' | grep -q "$(basename "$f")"
+            echo "::notice::已上傳 $tag ($(du -h "$f" | cut -f1))"
+            n=$((n+1))
+          done
+          echo "::notice::共上傳 $n 天的 1 分 K"
+
       - name: 存回 repo
         run: bash .github/commit.sh "backfill ${{ inputs.start }}~${{ inputs.end }}"

@@ -135,8 +135,14 @@ def main(init=False):
     prune_snapshots(today)
 
 
-def eod_for_day(day, raw, daily, uni, cfg):
-    """單一交易日的盤後計算（盤後批次與補跑共用）。daily 需含該日與之前的日線，且日線檔已存檔。"""
+def eod_for_day(day, raw, daily, uni, cfg, update_prof=True, build_base=True):
+    """單一交易日的盤後計算（盤後批次與補跑共用）。daily 需含該日與之前的日線，且日線檔已存檔。
+
+    update_prof=False：不更新分鐘量基準 profile.csv。補跑時必須關掉——補的日子多半已經在
+      profile 裡，再灌一次會讓基準偏向那幾天，而 profile 正是盤中的退回分母。
+    build_base=False：不計算同時點基準。補跑是倒著補歷史，用 available_days() 會抓到比補跑日
+      更晚的日期，算出來的基準是錯的；補跑只負責存 1 分 K，基準交給當天的盤後批次重算。
+    """
     raw = raw[raw["time"].dt.normalize() == day]
     bars = raw.merge(uni[["yahoo", "code"]], left_on="ticker", right_on="yahoo").drop(columns=["ticker", "yahoo"])
     log.info(f"{day:%Y-%m-%d} 1 分鐘 K 線：{bars['code'].nunique()} 檔、{len(bars)} 根")
@@ -170,20 +176,23 @@ def eod_for_day(day, raw, daily, uni, cfg):
 
     stats_today = make_stats(cfg, day)
     if not bars.empty:
-        update_profile(bars)
+        if update_prof:
+            update_profile(bars)
         # ---- 1 分 K 歷史：存成本地檔，由 workflow 的 gh CLI 上傳為 Release 附件 ----
         try:
             bars_store.save_local(bars, day, stats_today)
-            # 同時點基準：含當日在內的近 20 日，供明天盤中直接使用（盤中只需抓這一個小檔）
-            hist, got = bars_store.load_history(bars_store.available_days(limit=25)[:20] or [day])
-            if day not in got:        # Release 尚未上傳當日檔，補上本地剛存的
-                today_df = bars_store.to_frame(bars, stats_today).assign(day=day)
-                hist = pd.concat([hist, today_df], ignore_index=True)
-                got = sorted(set(got) | {day})
-            bl = bars_store.build_baseline(hist)
-            if not bl.empty:
-                bars_store.save_baseline(bl, day)
-                log.info(f"同時點基準使用 {len(got)} 個交易日（3分鐘/連續放量取近 5 日、成交量暴增取近 20 日）")
+            if build_base:
+                # 同時點基準：含當日在內的近 20 日，供明天盤中直接使用（盤中只需抓這一個小檔）
+                hist, got = bars_store.load_history(bars_store.available_days(limit=25)[:20] or [day])
+                if day not in got:    # Release 尚未上傳當日檔，補上本地剛存的
+                    today_df = bars_store.to_frame(bars, stats_today).assign(day=day)
+                    hist = pd.concat([hist, today_df], ignore_index=True)
+                    got = sorted(set(got) | {day})
+                bl = bars_store.build_baseline(hist)
+                if not bl.empty:
+                    bars_store.save_baseline(bl, day)
+                    log.info(f"同時點基準使用 {len(got)} 個交易日"
+                             f"（3分鐘/連續放量取近 5 日、成交量暴增取近 20 日）")
         except Exception as e:
             log.warning(f"1 分 K 存檔／基準計算失敗（不影響當日監控）：{e}")
         q = bars_store.quality(bars, daily[daily["date"] == day].set_index("code")["volume"])
