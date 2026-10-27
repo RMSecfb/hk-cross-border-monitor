@@ -66,8 +66,11 @@ def make_stats(cfg, asof):
     shares = CONFIG / "shares.csv"
     if shares.exists():
         sh = pd.read_csv(shares)
-        cols = ["code", "shares"] + (["source"] if "source" in sh else [])   # source 由 update_shares.py 產生
-        sh = sh[cols].rename(columns={"source": "shares_src"})
+        # source 由 update_shares.py 產生；舊檔沒有這欄，代表是 fast_info 的 A+H 合計股數，
+        # 一律標為 implied，讓換手率警報帶上「股本為A+H合計」的備註，不要靜默用錯分母
+        if "source" not in sh:
+            sh["source"] = "implied"
+        sh = sh[["code", "shares", "source"]].rename(columns={"source": "shares_src"})
         stats = stats.merge(sh, on="code", how="left")
     stats.to_csv(path("stats", f"stats_{asof:%Y%m%d}.csv"), index=False)
     log.info(f"基準檔 stats_{asof:%Y%m%d}.csv：{len(stats)} 檔")
