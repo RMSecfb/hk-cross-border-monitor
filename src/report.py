@@ -32,7 +32,13 @@ def _threshold(rule, level, cfg, vcm_pct):
         # 等級同時取決於分池與金額條件，報表列出兩軌的偏離門檻供對照
         m, t = cfg["cas_dev_main"].get(level), cfg["cas_dev_thin"].get(level)
         return f"{level} 一般股 ±{m}% / 冷門股 ±{t}%" if m is not None else ""
-    th = cfg.get(key, {}).get(level)
+    conf = cfg.get(key, {})
+    if "A" in conf:                      # 雙軌：兩軌門檻相同時只寫一次，不同時並列
+        a, b_ = conf["A"].get(level), conf["B"].get(level)
+        if a is None:
+            return ""
+        return f"{level} {a}{unit}" if a == b_ else f"{level} 熱門 {a}{unit} / 冬眠 {b_}{unit}"
+    th = conf.get(level)
     if th is None:
         return ""
     return f"{level} ±{th}%" if unit == "%" and rule not in ("換手率異常",) else f"{level} {th}{unit}"

@@ -885,9 +885,11 @@ RULE_INFO = {  # 參數鍵: (監控項目, 單位, 適用範圍, Excel 出處)
     "open_gap": ("開盤價異常", "%", "全市場", "價格異常"),
     "cas_dev_main": ("收市競價異常（一般股）", "%", "20 日均成交額 ≥ 1,000 萬（盤後）", "價格異常"),
     "cas_dev_thin": ("收市競價異常（冷門股）", "%", "20 日均成交額 < 1,000 萬（盤後）；橙紅另需金額條件", "價格異常"),
-    "vol_ratio": ("成交量暴增", "倍", "全市場", "成交量異常"),
-    "vol_3m": ("3 分鐘成交量暴增", "倍", "活躍股", "成交量異常"),
-    "vol_streak": ("連續放量", "倍/分鐘", "活躍股", "成交量異常"),
+    "vol_ratio.A": ("成交量暴增（熱門股 A 軌）", "倍", "20 日均成交額 ≥ 1,000 萬", "成交量異常"),
+    "vol_ratio.B": ("成交量暴增（冬眠股 B 軌）", "倍", "20 日均成交額 < 1,000 萬", "成交量異常"),
+    "vol_3m.A": ("3 分鐘成交量暴增（熱門股 A 軌）", "倍", "20 日均成交額 ≥ 1,000 萬", "成交量異常"),
+    "vol_3m.B": ("3 分鐘成交量暴增（冬眠股 B 軌）", "倍", "20 日均成交額 < 1,000 萬", "成交量異常"),
+    "vol_streak": ("連續放量", "倍/分鐘", "活躍股（單軌）", "成交量異常"),
     "turnover": ("換手率異常", "%", "全市場（需股本資料，僅盤後）", "成交量異常"),
     "vcm_ratio": ("VCM 預警", "佔門檻比例", "VCM 名單；09:45–12:00、13:15–15:40", "VCM與市場機制"),
 }
@@ -898,6 +900,7 @@ OTHER_INFO = {
     "active_min_avg_turnover_hkd": ("活躍股門檻：20 日平均成交額", "港元"),
     "vol_streak_minutes": ("連續放量的連續分鐘數", "分鐘"),
     "min_profile_days": ("分鐘量基準至少累積天數", "交易日"),
+    "pool_split_turnover": ("量能雙軌 A／B 分池（20 日均成交額）", "港元"),
     "cas_pool_split_turnover": ("收市競價：一般股／冷門股分流（20 日均成交額）", "港元"),
     "cas_max_stale_min": ("收市競價：最後成交距 16:00 超過此值降一級", "分鐘"),
     "cas_max_dev": ("收市競價：偏離超過此值視為資料異常", "%"),
@@ -908,7 +911,8 @@ OTHER_INFO = {
 
 RULE_NAME = {"day_change": "即時漲跌幅", "chg_1m": "1分鐘急漲急跌", "chg_5m": "5分鐘急漲急跌", "ma_dev": "偏離均線",
              "open_gap": "開盤價異常", "cas_dev_main": "收市競價異常", "cas_dev_thin": "收市競價異常",
-             "vol_ratio": "成交量暴增", "vol_3m": "3分鐘量暴增", "vol_streak": "連續放量",
+             "vol_ratio.A": "成交量暴增", "vol_ratio.B": "成交量暴增",
+             "vol_3m.A": "3分鐘量暴增", "vol_3m.B": "3分鐘量暴增", "vol_streak": "連續放量",
              "turnover": "換手率異常", "vcm_ratio": "VCM預警"}
 EXTRA_COOLDOWN = ["VCM預警"]
 
@@ -916,6 +920,13 @@ EXTRA_COOLDOWN = ["VCM預警"]
 def num(v):
     """整數就存整數"""
     return int(v) if float(v).is_integer() else float(v)
+
+
+def dig(d, key):
+    """支援 "vol_ratio.A" 這種巢狀鍵；取不到回傳 {}"""
+    for part in key.split("."):
+        d = (d or {}).get(part, {})
+    return d or {}
 
 
 def save_params(changes, rule_edits, other_edits, cd_edits, action_edits, who, why):
@@ -932,7 +943,10 @@ def save_params(changes, rule_edits, other_edits, cd_edits, action_edits, who, w
         text, sha = gh.get_file("config/rules.yaml")
         doc = ry.load(text)
         for key, lv, v in rule_edits:
-            doc[key][lv] = num(v)
+            node = doc
+            for part in key.split("."):          # 支援 "vol_ratio.A" 這種雙軌鍵
+                node = node[part]
+            node[lv] = num(v)
         for key, v in other_edits:
             doc[key] = num(v)
         for rule, v in cd_edits:
@@ -968,15 +982,19 @@ with tab_param:
     st.subheader("異常交易監控閾值")
     rows = []
     for key, (name, unit, scope, src) in RULE_INFO.items():
-        v = cfg.get(key, {})
+        v = dig(cfg, key)
         rows.append({"鍵": key, "類別": src, "監控項目": name, "黃": v.get("黃"), "橙": v.get("橙"), "紅": v.get("紅"),
-                     "單位": unit, "適用範圍": scope, "冷卻（分）": cd.get(RULE_NAME[key])})
+                     "單位": unit, "成交額下限": v.get("min_turnover"), "適用範圍": scope,
+                     "冷卻（分）": cd.get(RULE_NAME[key])})
     th_df = pd.DataFrame(rows)
     th_new = st.data_editor(th_df, hide_index=True, use_container_width=True, key="ed_th",
                             disabled=["鍵", "類別", "監控項目", "單位", "適用範圍"],
                             column_config={"鍵": None, "黃": st.column_config.NumberColumn(min_value=0),
                                            "橙": st.column_config.NumberColumn(min_value=0),
                                            "紅": st.column_config.NumberColumn(min_value=0),
+                                           "成交額下限": st.column_config.NumberColumn(
+                                               "成交額下限（港元）", min_value=0, step=100000, format="%d",
+                                               help="僅雙軌的量能指標適用：當下累計成交額低於此值不判定"),
                                            "冷卻（分）": st.column_config.NumberColumn(min_value=0, step=1)})
 
     st.subheader("VCM 參數")
@@ -1014,6 +1032,10 @@ with tab_param:
             if pd.notna(n[lv]) and float(n[lv]) != float(o[lv]):
                 rule_edits.append((o["鍵"], lv, n[lv]))
                 changes.append((f"{o['監控項目']}・{lv}", o[lv], num(n[lv])))
+        if pd.notna(n["成交額下限"]) and pd.notna(o["成交額下限"]) \
+                and float(n["成交額下限"]) != float(o["成交額下限"]):
+            rule_edits.append((o["鍵"], "min_turnover", n["成交額下限"]))
+            changes.append((f"{o['監控項目']}・成交額下限", o["成交額下限"], num(n["成交額下限"])))
         if not (float(n["黃"]) <= float(n["橙"]) <= float(n["紅"])):
             errors.append(f"{o['監控項目']}：需 黃 ≤ 橙 ≤ 紅")
         if pd.notna(n["冷卻（分）"]) and float(n["冷卻（分）"]) != float(o["冷卻（分）"]):

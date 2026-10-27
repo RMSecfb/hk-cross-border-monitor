@@ -29,6 +29,25 @@ def grade(values, th):
     return np.select([v >= th["紅"], v >= th["橙"], v >= th["黃"]], LEVELS, default=None)
 
 
+def dual_grade(values, avg_turnover, cur_turnover, th, split):
+    """雙軌分級（成交量暴增、3 分鐘量暴增）
+
+    A 軌＝熱門股（20 日均成交額 ≥ split）、B 軌＝冬眠股（< split）。
+    兩軌的倍數門檻目前相同，差別只在「當下累計成交額」的絕對下限：冬眠股平時幾乎沒有成交，
+    用倍數衡量會被極小的分母放大，故要求更高的實際成交金額才列入判定。
+    th 若仍是舊的單軌格式（直接是 黃/橙/紅），則退回單軌。
+    """
+    if "A" not in th:
+        return grade(values, th)
+    cur = np.asarray(cur_turnover, dtype=float)
+    lv = {}
+    for k in ("A", "B"):
+        t = th[k]
+        lv[k] = np.where(cur >= t.get("min_turnover", 0), grade(values, t), None)
+    is_a = np.asarray(pd.Series(avg_turnover).fillna(-1).values) >= split
+    return np.where(is_a, lv["A"], lv["B"])
+
+
 def tod(t):
     """時間 → 當日時刻（Timedelta）"""
     return t - t.dt.normalize()
@@ -159,7 +178,9 @@ def run_rules(bars, stats, universe, cfg, profile=None, daily_close=None, ex_div
     bt = b.set_index("time")
     vol3 = bt.groupby("code", sort=False)["volume"].rolling("3min").sum().values
     r3 = vol3 / (3 * b["base_min"])
-    out.append(emit(b, active, "3分鐘量暴增", grade(r3, cfg["vol_3m"]), r3, "3 分鐘量 / 同時段均量"))
+    split = cfg["pool_split_turnover"]
+    lv3 = dual_grade(r3, avg_to, b["turnover_hkd"], cfg["vol_3m"], split)
+    out.append(emit(b, pd.Series(True, index=b.index), "3分鐘量暴增", lv3, r3, "3 分鐘量 / 同時段均量"))
 
     n = cfg["vol_streak_minutes"]
     r1 = (b["volume"] / b["base_min"]).fillna(0)
@@ -193,8 +214,9 @@ def run_rules(bars, stats, universe, cfg, profile=None, daily_close=None, ex_div
                     grade(madev, cfg["ma_dev"]), madev, f"vs MA{cfg['ma_days']}"))
 
     vr = last["cum_vol"] / expected_volume(last["code"], last["time"], profile, last["avg_vol"])
-    out.append(emit(last, vr.notna() & np.isfinite(vr) & last_liquid, "成交量暴增",
-                    grade(vr, cfg["vol_ratio"]), vr, "累計量 / 同時點均量"))
+    last_avg_to = last["avg_turnover"] if "avg_turnover" in last else pd.Series(np.nan, index=last.index)
+    lvr = dual_grade(vr, last_avg_to, last["turnover_hkd"], cfg["vol_ratio"], cfg["pool_split_turnover"])
+    out.append(emit(last, vr.notna() & np.isfinite(vr), "成交量暴增", lvr, vr, "累計量 / 同時點均量"))
 
     # 換手率異常：只在盤後計算。分子改用日線成交量——1 分 K 加總相對日線量灌水約 2 倍，
     # 盤中又只有部分時段的量，換算出的換手率沒有可比性（見規劃書 5.3、5.4）。
