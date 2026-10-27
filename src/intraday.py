@@ -115,7 +115,10 @@ def main(force=False):
     all_f = path("alerts", f"alerts_{today:%Y%m%d}.csv")
     old = pd.read_csv(all_f, parse_dates=["time"]) if all_f.exists() else alerts.iloc[0:0]
     new = alerts[~alert_key(alerts).isin(set(alert_key(old)))].assign(found_at=stamp)
-    pd.concat([old, new]).to_csv(all_f, index=False, encoding="utf-8-sig")
+    merged = pd.concat([old, new], ignore_index=True)
+    if "note" in merged:                       # 舊版本寫的檔沒有 note 欄，補空字串避免顯示 NaN
+        merged["note"] = merged["note"].fillna("")
+    merged.to_csv(all_f, index=False, encoding="utf-8-sig")
     if not new.empty:
         new.to_csv(path("alerts", f"alerts_new_{stamp}.csv"), index=False, encoding="utf-8-sig")
     lv = new["level"].value_counts().to_dict()

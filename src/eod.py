@@ -143,7 +143,11 @@ def eod_for_day(day, raw, daily, uni, cfg):
     prev_stats = pd.read_csv(prev_f) if prev_f.exists() else make_stats(cfg, prev_day)
     prof_f = path("profile", "profile.csv")
     prof = pd.read_csv(prof_f, dtype={"bucket": str}) if prof_f.exists() else None
-    base = bars_store.fetch_baseline(before=day)      # 用不含當日的基準，與盤中同條件
+    try:
+        base = bars_store.fetch_baseline(before=day)  # 用不含當日的基準，與盤中同條件
+    except Exception as e:
+        base = None
+        log.warning(f"同時點基準取得失敗，改用時段內插法：{e}")
     close_day = daily[daily["date"] == day].set_index("code")["close"]
     vol_day = daily[daily["date"] == day].set_index("code")["volume"]    # 換手率分子：日線成交量
 
