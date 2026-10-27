@@ -13,6 +13,7 @@ import sys
 import numpy as np
 import pandas as pd
 
+import bars_store
 from common import (SETTINGS, download, get_logger, latest_file, load_universe, load_yaml, now_hkt, path)
 from rules import apply_cooldown, expected_volume, run_rules
 
@@ -114,10 +115,19 @@ def main(force=False):
         new.to_csv(path("alerts", f"alerts_new_{stamp}.csv"), index=False, encoding="utf-8-sig")
     lv = new["level"].value_counts().to_dict()
 
+    # 資料品質：1 分 K 加總 ÷ 前一交易日日線量（只記錄，不影響判定）
+    try:
+        q = bars_store.quality(bars, stats.set_index("code")["avg_vol"]) if "avg_vol" in stats else {}
+        if q:
+            q["note"] = "1分K加總 ÷ 20日均量；偏離 1 很遠代表 Yahoo 分鐘資料可信度低"
+    except Exception:
+        q = {}
+
     status = {"run_at": f"{now:%Y-%m-%d %H:%M:%S}", "trade_date": day, "data_until": f"{bars['time'].max():%H:%M}",
               "stocks_ok": int(got), "stocks_total": int(len(uni)),
               "missing": sorted(map(int, set(uni["code"]) - set(bars["code"])))[:500],
               "new_alerts": {k: int(lv.get(k, 0)) for k in ["紅", "橙", "黃"]},
+              "data_quality": q,
               "snapshot_file": f"snapshot/{day}/snapshot_{stamp}.parquet"}
     path("status.json").write_text(json.dumps(status, ensure_ascii=False, indent=1), encoding="utf-8")
     log.info(f"新增警報 {len(new)} 筆：紅 {lv.get('紅', 0)}、橙 {lv.get('橙', 0)}、黃 {lv.get('黃', 0)}")

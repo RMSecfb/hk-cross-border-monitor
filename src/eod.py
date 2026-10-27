@@ -8,11 +8,13 @@
 用法：python src/eod.py           一般盤後
       python src/eod.py --init    第一次使用：下載約半年日線並建立基準檔（任何時間都可執行）
 """
+import json
 import shutil
 import sys
 
 import pandas as pd
 
+import bars_store
 import universe
 from common import CONFIG, DATA, SETTINGS, download, get_logger, load_universe, load_yaml, now_hkt, path
 from report import write_reports
@@ -139,9 +141,20 @@ def eod_for_day(day, raw, daily, uni, cfg):
     log.info(f"{day:%Y-%m-%d} 盤後警報 {len(alerts)} 筆，預警列表 {len(rep)} 列，"
              f"上榜 {(score['score'] >= cfg['list_min_score']).sum()} 檔")
 
-    make_stats(cfg, day)
+    stats_today = make_stats(cfg, day)
     if not bars.empty:
         update_profile(bars)
+        # ---- 1 分 K 歷史：存成本地檔，由 workflow 的 gh CLI 上傳為 Release 附件 ----
+        try:
+            bars_store.save_local(bars, day, stats_today)
+        except Exception as e:
+            log.warning(f"1 分 K 存檔失敗（不影響當日監控）：{e}")
+        q = bars_store.quality(bars, daily[daily["date"] == day].set_index("code")["volume"])
+        if q:
+            log.info(f"資料品質 1分K加總÷日線量：中位數 {q['median']}、"
+                     f"5–95 百分位 {q['p05']}–{q['p95']}、超過 2 倍 {q['over_2x']} 檔")
+            path("quality", f"quality_{day:%Y%m%d}.json").write_text(
+                json.dumps(q, ensure_ascii=False, indent=1), encoding="utf-8")
 
 
 if __name__ == "__main__":

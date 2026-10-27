@@ -87,7 +87,16 @@ def download(tickers, period, interval, logger=None, start=None, end=None):
                     logger.warning(f"批次 {i}-{i + len(batch)} 第 {attempt} 次失敗：{e}")
                 time.sleep(pause * 5 * attempt)
         time.sleep(pause)
-    return pd.concat(out, ignore_index=True) if out else _to_long(None, tickers)
+    if not out:
+        return _to_long(None, tickers)
+    df = pd.concat(out, ignore_index=True)
+    # 同一檔同一時點只留一筆：重複會讓滾動加總與累計量灌水，進而污染所有量能指標
+    n0 = len(df)
+    df = (df.drop_duplicates(subset=["ticker", "time"], keep="last")
+            .sort_values(["ticker", "time"]).reset_index(drop=True))   # 去重會打亂順序，重新排好
+    if logger and len(df) < n0:
+        logger.warning(f"下載結果有 {n0 - len(df):,} 筆重複（ticker+time），已去除")
+    return df
 
 
 def latest_file(folder, pattern, before=None):

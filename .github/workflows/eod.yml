@@ -58,6 +58,35 @@ jobs:
         run: pip install -r requirements-pipeline.txt
       - if: steps.gate.outputs.skip != 'true'
         run: python src/eod.py ${{ inputs.init && '--init' || '' }}
+
+      # 1 分 K 歷史存為 Release 附件：不佔 git 容量、不計費，刪除後空間即回收。
+      # 供「過去 N 日同時點」基準使用（3分鐘量暴增/連續放量需 5 日、成交量暴增需 20 日）。
+      - if: steps.gate.outputs.skip != 'true'
+        name: 上傳 1 分 K 至 Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -e
+          f=$(ls -1 data/bars/bars_*.parquet 2>/dev/null | sort | tail -1) || true
+          if [ -z "$f" ]; then echo "::notice::本次沒有 1 分 K 檔案，略過"; exit 0; fi
+          day=$(basename "$f" .parquet); day=${day#bars_}
+          tag="bars-$day"
+          if gh release view "$tag" >/dev/null 2>&1; then
+            gh release upload "$tag" "$f" --clobber
+          else
+            gh release create "$tag" "$f" --title "1 分 K $day" --notes "自動產生，保留 30 天" --prerelease
+          fi
+          # 確認附件確實存在，避免靜默失敗
+          gh release view "$tag" --json assets --jq '.assets[].name' | grep -q "$(basename "$f")"
+          echo "::notice::已上傳 $tag / $(basename "$f") ($(du -h "$f" | cut -f1))"
+          # 刪除超過 30 天的，連同 tag 一併清除
+          cut=$(date -u -d "30 days ago" +%Y%m%d)
+          for t in $(gh release list --limit 200 --json tagName --jq '.[].tagName' | grep '^bars-' || true); do
+            if [ "${t#bars-}" -lt "$cut" ]; then
+              gh release delete "$t" --yes --cleanup-tag && echo "已刪除 $t"
+            fi
+          done
+
       - if: steps.gate.outputs.skip != 'true'
         name: 存回 repo
         run: bash .github/commit.sh "eod"

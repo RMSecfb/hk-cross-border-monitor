@@ -8,3 +8,7 @@ __pycache__/
 secrets.toml
 *.env
 .env
+
+# 1 分 K 歷史：存為 GitHub Release 附件，絕不可進 git
+# （git 歷史不會因刪檔而縮小，每日 1.9 MB 進版控將以每年約 0.47 GB 永久累積）
+data/bars/
