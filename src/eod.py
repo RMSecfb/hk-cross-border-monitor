@@ -65,7 +65,10 @@ def make_stats(cfg, asof):
     }).reset_index()
     shares = CONFIG / "shares.csv"
     if shares.exists():
-        stats = stats.merge(pd.read_csv(shares)[["code", "shares"]], on="code", how="left")
+        sh = pd.read_csv(shares)
+        cols = ["code", "shares"] + (["source"] if "source" in sh else [])   # source 由 update_shares.py 產生
+        sh = sh[cols].rename(columns={"source": "shares_src"})
+        stats = stats.merge(sh, on="code", how="left")
     stats.to_csv(path("stats", f"stats_{asof:%Y%m%d}.csv"), index=False)
     log.info(f"基準檔 stats_{asof:%Y%m%d}.csv：{len(stats)} 檔")
     return stats
@@ -141,13 +144,14 @@ def eod_for_day(day, raw, daily, uni, cfg):
     prof_f = path("profile", "profile.csv")
     prof = pd.read_csv(prof_f, dtype={"bucket": str}) if prof_f.exists() else None
     close_day = daily[daily["date"] == day].set_index("code")["close"]
+    vol_day = daily[daily["date"] == day].set_index("code")["volume"]    # 換手率分子：日線成交量
 
     today_row = daily[daily["date"] == day]
     ex_div = set(today_row.loc[today_row["dividends"] > 0, "code"]) if "dividends" in today_row else set()
     if ex_div:
         log.info(f"{day:%Y-%m-%d} 除息股 {len(ex_div)} 檔，價格類警報將加註")
     alerts = apply_cooldown(run_rules(bars, prev_stats, uni, cfg, prof, daily_close=close_day,
-                                      ex_div_codes=ex_div), cfg["cooldown_min"])
+                                      ex_div_codes=ex_div, daily_volume=vol_day), cfg["cooldown_min"])
     alerts.to_csv(path("report", f"eod_alerts_{day:%Y%m%d}.csv"), index=False, encoding="utf-8-sig")
     summary = alerts.pivot_table(index="rule", columns="level", values="code", aggfunc="count", fill_value=0)
     summary.to_csv(path("report", f"eod_summary_{day:%Y%m%d}.csv"), encoding="utf-8-sig")

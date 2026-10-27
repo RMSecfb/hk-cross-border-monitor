@@ -14,7 +14,7 @@ concurrency:
 jobs:
   run:
     runs-on: ubuntu-latest
-    timeout-minutes: 90
+    timeout-minutes: 300        # info() 比 fast_info 慢很多，全港股約 1–2 小時
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5

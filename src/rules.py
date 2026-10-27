@@ -18,6 +18,9 @@ VCM_AM, VCM_PM = (pd.Timedelta("9h45m"), pd.Timedelta("12h")), (pd.Timedelta("13
 # 規則分組：供「只加註不排除」的標記使用
 PRICE_RULES = ["即時漲跌幅", "開盤價異常", "1分鐘急漲急跌", "5分鐘急漲急跌", "偏離均線"]
 VOLUME_RULES = ["成交量暴增", "3分鐘量暴增", "連續放量", "換手率異常"]
+# 分鐘級規則：同一批次內每檔只留最嚴重的一筆（原本每分鐘都判斷，一波拉抬會報出數十筆）
+BATCH_MAX_RULES = ["3分鐘量暴增", "連續放量"]
+LEVEL_RANK = {lv: i for i, lv in enumerate(LEVELS)}
 
 
 def grade(values, th):
@@ -83,7 +86,8 @@ def emit(df, mask, rule, levels, value, detail):
                          "detail": detail})
 
 
-def run_rules(bars, stats, universe, cfg, profile=None, daily_close=None, ex_div_codes=None):
+def run_rules(bars, stats, universe, cfg, profile=None, daily_close=None, ex_div_codes=None,
+              daily_volume=None):
     if bars.empty:
         return pd.DataFrame(columns=COLS + ["name"])
     b = bars.sort_values(["code", "time"]).reset_index(drop=True)
@@ -145,11 +149,11 @@ def run_rules(bars, stats, universe, cfg, profile=None, daily_close=None, ex_div
 
     in_vcm = (((m >= VCM_AM[0]) & (m < VCM_AM[1])) | ((m >= VCM_PM[0]) & (m < VCM_PM[1]))) & \
              b["vcm_pct"].notna() & same_session
-    dev = chg5.abs()
-    vcm_lv = np.where(dev >= b["vcm_pct"], "紅", None)
-    out.append(emit(b, in_vcm, "VCM觸發(模擬)", vcm_lv, chg5, "偏離參考價達 VCM 門檻"))
-    early_lv = np.where((dev >= b["vcm_pct"] * cfg["vcm_early_ratio"]) & (dev < b["vcm_pct"]), "黃", None)
-    out.append(emit(b, in_vcm, "VCM內部預警", early_lv, chg5, f"達門檻 {cfg['vcm_early_ratio']:.0%}"))
+    # 原「VCM觸發(模擬)」與「VCM內部預警」合併為單一規則，改以「佔該股 VCM 門檻的比例」分三級。
+    # 紅燈承接原觸發位置；不再用「模擬」一詞，避免被誤認為交易所實際觸發紀錄。
+    vcm_ratio = chg5.abs() / b["vcm_pct"]
+    out.append(emit(b, in_vcm, "VCM預警", grade(vcm_ratio, cfg["vcm_ratio"]), chg5,
+                    "偏離參考價佔 VCM 門檻比例"))
 
     # ---- 3. 3 分鐘量暴增、連續放量（以時間視窗計算）----
     bt = b.set_index("time")
@@ -192,9 +196,12 @@ def run_rules(bars, stats, universe, cfg, profile=None, daily_close=None, ex_div
     out.append(emit(last, vr.notna() & np.isfinite(vr) & last_liquid, "成交量暴增",
                     grade(vr, cfg["vol_ratio"]), vr, "累計量 / 同時點均量"))
 
-    if "shares" in last and last["shares"].notna().any():
-        tr = last["cum_vol"] / last["shares"] * 100
-        out.append(emit(last, tr.notna(), "換手率異常", grade(tr, cfg["turnover"]), tr, "成交量 / 股本"))
+    # 換手率異常：只在盤後計算。分子改用日線成交量——1 分 K 加總相對日線量灌水約 2 倍，
+    # 盤中又只有部分時段的量，換算出的換手率沒有可比性（見規劃書 5.3、5.4）。
+    if daily_volume is not None and "shares" in last and last["shares"].notna().any():
+        day_vol = last["code"].map(daily_volume)
+        tr = day_vol / last["shares"] * 100
+        out.append(emit(last, tr.notna(), "換手率異常", grade(tr, cfg["turnover"]), tr, "日線成交量 / 在港股數"))
 
     # 開盤價異常：first 是「資料中的第一根 K 線」，對下午才首次成交的冷門股並非開盤價。
     # 實測 10/27 的 230 筆中，真正在 09:30 開盤者僅 13%，下午才首次成交者達 42 筆
@@ -207,17 +214,61 @@ def run_rules(bars, stats, universe, cfg, profile=None, daily_close=None, ex_div
     out.append(emit(f, (gap.notna().values & f_ok.values), "開盤價異常",
                     grade(gap.values, cfg["open_gap"]), gap.values, "開盤 vs 前收"))
 
-    # ---- 5. 收市競價（只在盤後提供 daily_close 時計算）----
+    # ---- 5. 收市競價異常（只在盤後提供 daily_close 時計算）----
+    # 三閥門設計，見規劃書六。重點：分子分母一律取 1 分 K，不用「日線量 − 1 分 K 累計量」，
+    # 該減法混用兩個不相容來源（比值 0.28~6.49 倍），實測 38~64% 的股票會算出負的 CAS 量。
     if daily_close is not None:
-        cts = b[tod(b["time"]) < PM[1]].groupby("code").tail(1).copy()
-        cas = (cts["code"].map(daily_close) / cts["close"] - 1) * 100
-        cts["time"] = cts["time"].dt.normalize() + pd.Timedelta("16h10m")
-        out.append(emit(cts, cas.notna(), "收市競價異常", grade(cas, cfg["cas_dev"]), cas,
-                        "收市價 vs 16:00 前最後價"))
+        t_all = tod(b["time"])
+        day_b, cas_b = b[t_all < PM[1]], b[t_all >= PM[1]]
+        cts = day_b.groupby("code").tail(1).copy() if not day_b.empty else day_b
+        if not cts.empty:
+            cas_pct = (cts["code"].map(daily_close) / cts["close"] - 1) * 100
+            dev = cas_pct.abs().values
+
+            # 閥門二：CAS 實質金額與占全日量比例（同源，不會出現負數）
+            amt = (cas_b["close"] * cas_b["volume"]).groupby(cas_b["code"]).sum()
+            cas_amt = cts["code"].map(amt).fillna(0).values
+            cas_ratio = (cts["code"].map(cas_b.groupby("code")["volume"].sum())
+                         / cts["code"].map(b.groupby("code")["volume"].sum()) * 100).fillna(0).values
+
+            # 閥門三：依 20 日均成交額分流。一般股只看偏離度，冷門股的橙／紅另需金額或占比條件
+            split = cfg["cas_pool_split_turnover"]
+            avg_to_c = cts["avg_turnover"] if "avg_turnover" in cts else pd.Series(np.nan, index=cts.index)
+            main = (avg_to_c >= split).fillna(False).values
+            th_m, th_t = cfg["cas_dev_main"], cfg["cas_dev_thin"]
+            lv_m = np.select([dev >= th_m["紅"], dev >= th_m["橙"], dev >= th_m["黃"]], LEVELS, default=None)
+            lv_t = np.select(
+                [(dev >= th_t["紅"]) & ((cas_amt >= th_t["紅_金額"]) | (cas_ratio >= th_t["紅_占比"])),
+                 (dev >= th_t["橙"]) & (cas_amt >= th_t["橙_金額"]),
+                 dev >= th_t["黃"]], LEVELS, default=None)
+            lv = np.where(main, lv_m, lv_t)
+
+            # 閥門一：持續交易最後一筆距 16:00 超過門檻 → 低頻交易的自然跳空，降一級（黃→不通報）
+            stale = ((PM[1] - tod(cts["time"])).dt.total_seconds().values / 60
+                     > cfg["cas_max_stale_min"])
+            lv = np.where(stale, pd.Series(lv).map({"紅": "橙", "橙": "黃"}).values, lv)
+
+            # CAS 委託價受限於參考價 ±5%，偏離超過此值在結構上不可能，判為資料異常不給等級
+            lv = np.where(dev > cfg["cas_max_dev"], None, lv)
+
+            cts = cts.copy()
+            cts["time"] = cts["time"].dt.normalize() + pd.Timedelta("16h10m")
+            out.append(emit(cts, cas_pct.notna().values, "收市競價異常", lv, cas_pct,
+                            "收市價 vs 16:00 前最後價"))
 
     alerts = pd.concat([o for o in out if not o.empty], ignore_index=True) if any(
         not o.empty for o in out) else pd.DataFrame(columns=COLS)
     alerts = alerts.merge(universe[["code", "name"]], on="code", how="left")
+
+    # ---- 每批次每檔取最嚴重一筆（僅分鐘級量能規則）----
+    per_batch = alerts["rule"].isin(BATCH_MAX_RULES)
+    if per_batch.any():
+        sel = alerts[per_batch]
+        keep = (sel.assign(_o=sel["level"].map(LEVEL_RANK), _v=sel["value"].abs())
+                   .sort_values(["_o", "_v"], ascending=[True, False])
+                   .drop_duplicates(["code", "rule"]).index)
+        alerts = alerts[~per_batch | alerts.index.isin(keep)].reset_index(drop=True)
+
     # ---- 標記：只加註、不改變判定，供人工判讀 ----
     tags = []
     # 除息：前收未還原權息，除息日股價自然下跌，價格類指標可能誤判
@@ -232,6 +283,12 @@ def run_rules(bars, stats, universe, cfg, profile=None, daily_close=None, ex_div
         if halted_codes:
             tags.append(("復牌首日（倍數失真）",
                          alerts["code"].isin(halted_codes) & alerts["rule"].isin(VOLUME_RULES)))
+    # 股本來源：取不到在港股數而退回 A+H 合計者，換手率的分母偏大、數值偏低
+    if "shares_src" in stats:
+        impl = set(stats.loc[stats["shares_src"] == "implied", "code"])
+        if impl:
+            tags.append(("股本為A+H合計（換手率偏低）",
+                         alerts["code"].isin(impl) & (alerts["rule"] == "換手率異常")))
     alerts["note"] = ""
     for label, m in tags:
         sep = np.where(alerts.loc[m, "note"] == "", "", "；")

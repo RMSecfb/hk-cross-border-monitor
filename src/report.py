@@ -12,22 +12,26 @@ RULE_FMT = {
     "5分鐘急漲急跌": ("chg_5m", "%", "{v:+.2f}%/5分"),
     "偏離均線": ("ma_dev", "%", "{v:+.2f}% vs MA{ma}"),
     "開盤價異常": ("open_gap", "%", "{v:+.2f}% vs 前收"),
-    "收市競價異常": ("cas_dev", "%", "{v:+.2f}% vs 16:00 價"),
+    "收市競價異常": (None, "%", "{v:+.2f}% vs 16:00 價"),
     "成交量暴增": ("vol_ratio", "倍", "{v:.1f} 倍均量"),
     "3分鐘量暴增": ("vol_3m", "倍", "{v:.1f} 倍（3 分鐘）"),
     "連續放量": ("vol_streak", "倍", "每分鐘 ≥{v:.1f} 倍 × {n} 分"),
     "換手率異常": ("turnover", "%", "{v:.1f}%"),
-    "VCM觸發(模擬)": (None, "%", "{v:+.2f}%/5分"),
-    "VCM內部預警": (None, "%", "{v:+.2f}%/5分"),
+    "VCM預警": (None, "%", "{v:+.2f}%/5分"),
 }
 
 
 def _threshold(rule, level, cfg, vcm_pct):
     key, unit, _ = RULE_FMT.get(rule, (None, "", ""))
-    if rule == "VCM觸發(模擬)":
-        return f"紅 ±{vcm_pct:.0f}%" if pd.notna(vcm_pct) else ""
-    if rule == "VCM內部預警":
-        return f"黃 ±{vcm_pct * cfg['vcm_early_ratio']:.0f}%" if pd.notna(vcm_pct) else ""
+    if rule == "VCM預警":
+        if pd.isna(vcm_pct):
+            return ""
+        r = cfg["vcm_ratio"].get(level)
+        return f"{level} ±{vcm_pct * r:.1f}%（門檻 ±{vcm_pct:.0f}% 的 {r:.0%}）" if r else ""
+    if rule == "收市競價異常":
+        # 等級同時取決於分池與金額條件，報表列出兩軌的偏離門檻供對照
+        m, t = cfg["cas_dev_main"].get(level), cfg["cas_dev_thin"].get(level)
+        return f"{level} 一般股 ±{m}% / 冷門股 ±{t}%" if m is not None else ""
     th = cfg.get(key, {}).get(level)
     if th is None:
         return ""

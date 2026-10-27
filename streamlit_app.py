@@ -636,7 +636,8 @@ with tab_vcm:
         st.info("尚無盤中快照。")
     else:
         v = snap[snap["vcm_pct"].notna()].sort_values("vcm_usage_pct", ascending=False)
-        st.caption("VCM 使用率 = 最近 5 分鐘漲跌幅 ÷ 該股 VCM 門檻。80% 以上為內部預警，100% 即達 VCM 觸發門檻（以 1 分鐘 K 線模擬）。已依使用率由大到小排序。")
+        st.caption("VCM 使用率 = 最近 5 分鐘漲跌幅 ÷ 該股 VCM 門檻。80–90% 黃、90–100% 橙、100% 以上紅（已達交易所熔斷門檻）。"
+               "以 1 分鐘 K 線計算，為內部值而非交易所實際觸發紀錄。已依使用率由大到小排序。")
         st.dataframe(
             v[["code", "name", "vcm_pct", "chg_5m_pct", "vcm_usage_pct", "price", "chg_pct", "last_time"]],
             hide_index=True, use_container_width=True, height=h(len(v)),
@@ -882,11 +883,13 @@ RULE_INFO = {  # 參數鍵: (監控項目, 單位, 適用範圍, Excel 出處)
     "chg_5m": ("5 分鐘急漲急跌", "%", "全市場（當日成交額達門檻）", "價格異常"),
     "ma_dev": ("偏離移動平均", "%", "活躍股", "價格異常"),
     "open_gap": ("開盤價異常", "%", "全市場", "價格異常"),
-    "cas_dev": ("收市競價異常", "%", "全市場（盤後）", "價格異常"),
+    "cas_dev_main": ("收市競價異常（一般股）", "%", "20 日均成交額 ≥ 1,000 萬（盤後）", "價格異常"),
+    "cas_dev_thin": ("收市競價異常（冷門股）", "%", "20 日均成交額 < 1,000 萬（盤後）；橙紅另需金額條件", "價格異常"),
     "vol_ratio": ("成交量暴增", "倍", "全市場", "成交量異常"),
     "vol_3m": ("3 分鐘成交量暴增", "倍", "活躍股", "成交量異常"),
     "vol_streak": ("連續放量", "倍/分鐘", "活躍股", "成交量異常"),
-    "turnover": ("換手率異常", "%", "全市場（需股本資料）", "成交量異常"),
+    "turnover": ("換手率異常", "%", "全市場（需股本資料，僅盤後）", "成交量異常"),
+    "vcm_ratio": ("VCM 預警", "佔門檻比例", "VCM 名單；09:45–12:00、13:15–15:40", "VCM與市場機制"),
 }
 OTHER_INFO = {
     "ma_days": ("偏離均線使用的 MA 天數", "日"),
@@ -895,16 +898,19 @@ OTHER_INFO = {
     "active_min_avg_turnover_hkd": ("活躍股門檻：20 日平均成交額", "港元"),
     "vol_streak_minutes": ("連續放量的連續分鐘數", "分鐘"),
     "min_profile_days": ("分鐘量基準至少累積天數", "交易日"),
-    "vcm_early_ratio": ("VCM 內部預警比例（門檻的幾成）", "比例"),
+    "cas_pool_split_turnover": ("收市競價：一般股／冷門股分流（20 日均成交額）", "港元"),
+    "cas_max_stale_min": ("收市競價：最後成交距 16:00 超過此值降一級", "分鐘"),
+    "cas_max_dev": ("收市競價：偏離超過此值視為資料異常", "%"),
     "list_min_score": ("趨勢追蹤：風險分數達此值視為上榜", "分"),
     "streak_min_score": ("連續異常標的：分數門檻（進入連續異常列表）", "分"),
     "streak_days": ("趨勢追蹤：連續異常標的的連續天數", "交易日"),
 }
 
 RULE_NAME = {"day_change": "即時漲跌幅", "chg_1m": "1分鐘急漲急跌", "chg_5m": "5分鐘急漲急跌", "ma_dev": "偏離均線",
-             "open_gap": "開盤價異常", "cas_dev": "收市競價異常", "vol_ratio": "成交量暴增",
-             "vol_3m": "3分鐘量暴增", "vol_streak": "連續放量", "turnover": "換手率異常"}
-EXTRA_COOLDOWN = ["VCM觸發(模擬)", "VCM內部預警"]
+             "open_gap": "開盤價異常", "cas_dev_main": "收市競價異常", "cas_dev_thin": "收市競價異常",
+             "vol_ratio": "成交量暴增", "vol_3m": "3分鐘量暴增", "vol_streak": "連續放量",
+             "turnover": "換手率異常", "vcm_ratio": "VCM預警"}
+EXTRA_COOLDOWN = ["VCM預警"]
 
 
 def num(v):
@@ -978,11 +984,15 @@ with tab_param:
     if uni_f.exists():
         u = pd.read_csv(uni_f)
         vc = u["vcm_pct"].dropna().value_counts().sort_index()
-        vrows = [{"觸發門檻": f"±{p:.0f}%", "內部預警": f"±{p * cfg['vcm_early_ratio']:.0f}%", "股票數": int(n)}
-                 for p, n in vc.items()]
+        vr = cfg["vcm_ratio"]
+        vrows = [{"交易所門檻": f"±{p:.0f}%",
+                  "黃": f"±{p * vr['黃']:.1f}%", "橙": f"±{p * vr['橙']:.1f}%", "紅": f"±{p * vr['紅']:.1f}%",
+                  "股票數": int(n)} for p, n in vc.items()]
         st.dataframe(pd.DataFrame(vrows), hide_index=True, use_container_width=True)
-    st.caption("觸發門檻取自 HKEX 每次公布的 VCM 證券名單（每日盤後自動更新，不在此修改）；內部預警比例與冷卻時間可在下表修改。"
-               "不適用時段：早、午市首 15 分鐘，午市最後 20 分鐘，開市前與收市競價時段；午市不沿用早市參考價；冷靜期 5 分鐘。")
+    st.caption("交易所門檻取自 HKEX 每次公布的 VCM 證券名單（每日盤後自動更新，不在此修改）；"
+               "三級比例（上表「異常交易監控閾值」的 vcm_ratio）與冷卻時間可修改。紅燈代表已達交易所熔斷門檻。"
+               "不適用時段：早、午市首 15 分鐘，午市最後 20 分鐘，開市前與收市競價時段；午市不沿用早市參考價。"
+               "本欄為以 1 分鐘 K 線計算的內部值，非交易所實際觸發紀錄。")
     vcm_cd = pd.DataFrame([{"規則": r, "冷卻（分）": cd.get(r)} for r in EXTRA_COOLDOWN])
     vcm_cd_new = st.data_editor(vcm_cd, hide_index=True, use_container_width=True, key="ed_vcmcd", disabled=["規則"])
 
