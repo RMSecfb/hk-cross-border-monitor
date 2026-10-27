@@ -10,8 +10,12 @@
   只有在 profile 壞掉、要整個重建時才加 --rebuild-profile（會先清空再依補跑日期重建，
   重建後的累積天數等於補跑天數，若少於 min_profile_days 會讓 3 分鐘量暴增與連續放量暫時失效）。
 
-同時點基準（baseline）不在這裡算：補跑是倒著補歷史，用 available_days() 會抓到比補跑日更晚的
-日期。補跑只負責把 1 分 K 存起來，基準交給當天的盤後批次重算後上傳。
+同時點基準（baseline）由本程式逐日自行計算，**只用嚴格早於當天的歷史**（本機已補好的日子
+＋ Release 上既有的日子，取最近 20 日），所以補到後半段時，報告就是最終版公式的結果：
+  前 4 天沒有足夠歷史 → 退回時段內插；第 5 天起 3 分鐘量暴增與連續放量改用同時點分母；
+  第 10 天起成交量暴增也改用。
+算出來的基準不另存、不上傳 Release——基準統一交給當天的盤後批次重算後上傳，才不會在盤中
+無預警把公式換掉。
 
 Yahoo 的 1 分鐘資料約只保留 30 天。需先完成盤後初始化（data/daily 有這段期間的日線）。
 """
@@ -19,6 +23,7 @@ import sys
 
 import pandas as pd
 
+import bars_store
 from common import DATA, download, get_logger, load_universe, load_yaml, path
 from eod import eod_for_day, load_daily
 
@@ -45,6 +50,12 @@ def main(start, end, rebuild_profile=False):
     else:
         log.info("不更動分鐘量基準 profile.csv（補跑預設行為）")
 
+    try:
+        on_release = set(bars_store.available_days(limit=60))
+    except Exception as e:
+        on_release = set()
+        log.warning(f"讀取 Release 上既有的 1 分 K 清單失敗：{e}")
+
     done, skipped = [], []
     for d in days:
         d = pd.Timestamp(d)
@@ -54,7 +65,19 @@ def main(start, end, rebuild_profile=False):
             log.warning(f"{d:%Y-%m-%d} 抓不到 1 分鐘資料，略過")
             skipped.append(d)
             continue
-        eod_for_day(d, raw, daily, uni, cfg, update_prof=rebuild_profile, build_base=False)
+        # 同時點基準只能用「嚴格早於 d」的日子，否則就是拿未來算過去
+        prior = sorted(x for x in (set(done) | on_release) if x < d)[-20:]
+        base = None
+        if prior:
+            hist, got = bars_store.load_history(prior)
+            if got:
+                base = bars_store.build_baseline(hist)
+                log.info(f"{d:%Y-%m-%d} 同時點基準用 {len(got)} 個早於當天的交易日"
+                         f"（{got[0]:%m/%d}~{got[-1]:%m/%d}）")
+        if base is None:
+            log.info(f"{d:%Y-%m-%d} 之前無 1 分 K 歷史，量能指標走退回的時段內插法")
+        eod_for_day(d, raw, daily, uni, cfg, update_prof=rebuild_profile,
+                    build_base=False, baseline=base)
         done.append(d)
     log.info(f"補跑完成 {len(done)} 天"
              + (f"，略過 {len(skipped)} 天：{', '.join(f'{d:%m/%d}' for d in skipped)}" if skipped else "")

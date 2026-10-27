@@ -239,7 +239,11 @@ def run_rules(bars, stats, universe, cfg, profile=None, daily_close=None, ex_div
     streak_min = bt.rolling(f"{n}min").min().values
     streak_cnt = bt.rolling(f"{n}min").count().values
     streak_lv = np.where(streak_cnt >= n, grade(streak_min, cfg["vol_streak"]), None)
-    out.append(emit(b, active, "連續放量", streak_lv, streak_min, f"連續 {n} 分鐘每分鐘量倍數"))
+    # 與另外兩個量能指標一致，在說明欄標示這筆用的是哪一種分母
+    out.append(emit(b, active & tp3, "連續放量", streak_lv, streak_min,
+                    f"連續 {n} 分鐘每分鐘量 / 過去 5 日同時點平均"))
+    out.append(emit(b, active & ~tp3, "連續放量", streak_lv, streak_min,
+                    f"連續 {n} 分鐘每分鐘量倍數（歷史不足，暫用時段內插）"))
 
     # ---- 4. 全日型指標（每檔取最後一筆）----
     g = b.groupby("code", sort=False)

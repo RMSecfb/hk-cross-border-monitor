@@ -135,13 +135,16 @@ def main(init=False):
     prune_snapshots(today)
 
 
-def eod_for_day(day, raw, daily, uni, cfg, update_prof=True, build_base=True):
+def eod_for_day(day, raw, daily, uni, cfg, update_prof=True, build_base=True, baseline="auto"):
     """單一交易日的盤後計算（盤後批次與補跑共用）。daily 需含該日與之前的日線，且日線檔已存檔。
 
     update_prof=False：不更新分鐘量基準 profile.csv。補跑時必須關掉——補的日子多半已經在
       profile 裡，再灌一次會讓基準偏向那幾天，而 profile 正是盤中的退回分母。
-    build_base=False：不計算同時點基準。補跑是倒著補歷史，用 available_days() 會抓到比補跑日
-      更晚的日期，算出來的基準是錯的；補跑只負責存 1 分 K，基準交給當天的盤後批次重算。
+    build_base=False：跑完後不重算、不另存同時點基準檔。補跑時關掉——基準統一交給當天的
+      盤後批次重算後上傳，補跑只負責累積 1 分 K。
+    baseline="auto"：自行向 Release 取最近一份基準（盤後批次用）。補跑要自己算，因為
+      available_days() 會抓到比補跑日更晚的日期，必須由呼叫端只餵嚴格早於 day 的歷史；
+      傳 None 則明確表示沒有基準，一律走退回的時段內插法。
     """
     raw = raw[raw["time"].dt.normalize() == day]
     bars = raw.merge(uni[["yahoo", "code"]], left_on="ticker", right_on="yahoo").drop(columns=["ticker", "yahoo"])
@@ -152,11 +155,14 @@ def eod_for_day(day, raw, daily, uni, cfg, update_prof=True, build_base=True):
     prev_stats = pd.read_csv(prev_f) if prev_f.exists() else make_stats(cfg, prev_day)
     prof_f = path("profile", "profile.csv")
     prof = pd.read_csv(prof_f, dtype={"bucket": str}) if prof_f.exists() else None
-    try:
-        base = bars_store.fetch_baseline(before=day)  # 用不含當日的基準，與盤中同條件
-    except Exception as e:
-        base = None
-        log.warning(f"同時點基準取得失敗，改用時段內插法：{e}")
+    if isinstance(baseline, str) and baseline == "auto":
+        try:
+            base = bars_store.fetch_baseline(before=day)  # 用不含當日的基準，與盤中同條件
+        except Exception as e:
+            base = None
+            log.warning(f"同時點基準取得失敗，改用時段內插法：{e}")
+    else:
+        base = baseline
     close_day = daily[daily["date"] == day].set_index("code")["close"]
     vol_day = daily[daily["date"] == day].set_index("code")["volume"]    # 換手率分子：日線成交量
 
