@@ -29,7 +29,7 @@ def grade(values, th):
     return np.select([v >= th["紅"], v >= th["橙"], v >= th["黃"]], LEVELS, default=None)
 
 
-def dual_grade(values, avg_turnover, cur_turnover, th, split):
+def dual_grade(values, avg_turnover, cur_turnover, th, split, allow_b=True):
     """雙軌分級（成交量暴增、3 分鐘量暴增）
 
     A 軌＝熱門股（20 日均成交額 ≥ split）、B 軌＝冬眠股（< split）。
@@ -45,7 +45,27 @@ def dual_grade(values, avg_turnover, cur_turnover, th, split):
         t = th[k]
         lv[k] = np.where(cur >= t.get("min_turnover", 0), grade(values, t), None)
     is_a = np.asarray(pd.Series(avg_turnover).fillna(-1).values) >= split
-    return np.where(is_a, lv["A"], lv["B"])
+    # 冬眠股（B 軌）只在該檔的「同時點分母」可用時才開啟：舊的時段內插分母對幾乎不交易的股票
+    # 會把極小的基準放大成數百倍，先用舊公式開 B 軌等於自找雜訊（見規劃書 一、過渡期做法）。
+    allow = np.broadcast_to(np.asarray(allow_b, dtype=bool), is_a.shape)
+    return np.where(is_a, lv["A"], np.where(allow, lv["B"], None))
+
+
+def _expected_cum(baseline, codes, m_cut):
+    """過去 20 日 09:30 至 m_cut 的平均累計量。
+
+    基準檔只在「有成交的分鐘」留下一列，中間沒成交的分鐘累計量不變，
+    故以 merge_asof 向前對齊，取 ≤ m_cut 的最後一筆。
+    """
+    bl = baseline.loc[baseline["avgcum"].notna(), ["code", "m", "avgcum"]].copy()
+    if bl.empty:
+        return np.full(len(codes), np.nan)
+    bl = bl.astype({"m": "int64", "code": "int64"}).sort_values(["m", "code"])
+    tgt = pd.DataFrame({"pos": np.arange(len(codes)),
+                        "code": np.asarray(codes).astype("int64"),
+                        "m": np.int64(m_cut)}).sort_values(["m", "code"])
+    j = pd.merge_asof(tgt, bl, on="m", by="code", direction="backward")
+    return j.sort_values("pos")["avgcum"].values
 
 
 def tod(t):
@@ -106,7 +126,7 @@ def emit(df, mask, rule, levels, value, detail):
 
 
 def run_rules(bars, stats, universe, cfg, profile=None, daily_close=None, ex_div_codes=None,
-              daily_volume=None):
+              daily_volume=None, baseline=None):
     if bars.empty:
         return pd.DataFrame(columns=COLS + ["name"])
     b = bars.sort_values(["code", "time"]).reset_index(drop=True)
@@ -126,6 +146,24 @@ def run_rules(bars, stats, universe, cfg, profile=None, daily_close=None, ex_div
     else:
         b["vol_per_min"] = np.nan
     b["base_min"] = b["vol_per_min"].replace(0, np.nan)
+
+    # ---- 同時點基準（規劃書 二、三、四）----
+    # baseline 由盤後以過去 5／20 個交易日的 1 分 K 算好：
+    #   avg1 該分鐘平均量、avg3 結束於該分鐘的 3 分鐘平均量、avgcum 09:30 起的平均累計量。
+    # 比「同一個時點」才能扣掉該時點本來就會放量的特性（整點前、收盤前）；歷史不足時自動退回
+    # 原本的 30 分鐘時段內插法，並且不開 B 軌。
+    use_tp = baseline is not None and not baseline.empty
+    if use_tp:
+        b["mday"] = (b["time"].dt.hour * 60 + b["time"].dt.minute).astype("int32")
+        bl = baseline.rename(columns={"m": "mday"})
+        bl["mday"] = bl["mday"].astype("int32")
+        cols = ["code", "mday", "avg1", "avg3"] + [c for c in ("n_short",) if c in bl]
+        b = b.merge(bl[cols], on=["code", "mday"], how="left")
+        if "n_short" not in b:
+            b["n_short"] = 0
+    else:
+        b["avg1"] = b["avg3"] = np.nan
+        b["n_short"] = 0
     g = b.groupby("code", sort=False)
 
     # ---- 冷門股過濾（當日成交額過低者不做短時指標）；活躍股 = 20 日平均成交額達門檻 ----
@@ -177,13 +215,26 @@ def run_rules(bars, stats, universe, cfg, profile=None, daily_close=None, ex_div
     # ---- 3. 3 分鐘量暴增、連續放量（以時間視窗計算）----
     bt = b.set_index("time")
     vol3 = bt.groupby("code", sort=False)["volume"].rolling("3min").sum().values
-    r3 = vol3 / (3 * b["base_min"])
     split = cfg["pool_split_turnover"]
-    lv3 = dual_grade(r3, avg_to, b["turnover_hkd"], cfg["vol_3m"], split)
-    out.append(emit(b, pd.Series(True, index=b.index), "3分鐘量暴增", lv3, r3, "3 分鐘量 / 同時段均量"))
+    # 逐檔閘門：該檔自己累積的天數不足時（新上市、長期停牌），仍退回時段內插法且不開 B 軌
+    min_s = cfg["min_hist_days"]
+    tp3 = (b["avg3"].notna() & (b["n_short"] >= min_s)) if use_tp else pd.Series(False, index=b.index)
+    r3 = np.where(tp3, vol3 / b["avg3"].replace(0, np.nan), vol3 / (3 * b["base_min"]))
+    if tp3.any():
+        # t* = 今日該批次內 3 分鐘滾動量最大的視窗結束時點，倍數只在該時點算一筆
+        v3 = pd.Series(vol3, index=b.index)
+        at_max = (v3 > 0) & (v3 == v3.groupby(b["code"]).transform("max"))
+    else:
+        at_max = pd.Series(True, index=b.index)
+    lv3 = dual_grade(r3, avg_to, b["turnover_hkd"], cfg["vol_3m"], split, allow_b=tp3.values)
+    out.append(emit(b, tp3 & at_max, "3分鐘量暴增", lv3, r3,
+                    "今日 t* 的 3 分鐘量 / 過去 5 日同時點平均"))
+    out.append(emit(b, ~tp3, "3分鐘量暴增", lv3, r3,
+                    "3 分鐘量 / 同時段均量（歷史不足，暫用時段內插）"))
 
     n = cfg["vol_streak_minutes"]
-    r1 = (b["volume"] / b["base_min"]).fillna(0)
+    den1 = np.where(tp3, b["avg1"].replace(0, np.nan), b["base_min"]) if use_tp else b["base_min"]
+    r1 = (b["volume"] / den1).fillna(0)
     bt = b.assign(r1=r1).set_index("time").groupby("code", sort=False)["r1"]
     streak_min = bt.rolling(f"{n}min").min().values
     streak_cnt = bt.rolling(f"{n}min").count().values
@@ -213,10 +264,25 @@ def run_rules(bars, stats, universe, cfg, profile=None, daily_close=None, ex_div
     out.append(emit(last, madev.notna() & last_active & last_not_halted, "偏離均線",
                     grade(madev, cfg["ma_dev"]), madev, f"vs MA{cfg['ma_days']}"))
 
-    vr = last["cum_vol"] / expected_volume(last["code"], last["time"], profile, last["avg_vol"])
+    old_cum = np.asarray(expected_volume(last["code"], last["time"], profile, last["avg_vol"]), dtype=float)
+    if use_tp:
+        tp_cum = _expected_cum(baseline, last["code"], b["mday"].max())
+        n_long = last["code"].map(baseline.drop_duplicates("code").set_index("code")["n_long"]) \
+            if "n_long" in baseline else pd.Series(0, index=last.index)
+        ok_cum = pd.notna(tp_cum) & (tp_cum > 0) & (n_long.fillna(0).values >= cfg["min_hist_days_cum"])
+        exp_cum = np.where(ok_cum, tp_cum, old_cum)
+    else:
+        ok_cum = np.zeros(len(last), dtype=bool)
+        exp_cum = old_cum
+    vr = last["cum_vol"] / exp_cum
     last_avg_to = last["avg_turnover"] if "avg_turnover" in last else pd.Series(np.nan, index=last.index)
-    lvr = dual_grade(vr, last_avg_to, last["turnover_hkd"], cfg["vol_ratio"], cfg["pool_split_turnover"])
-    out.append(emit(last, vr.notna() & np.isfinite(vr), "成交量暴增", lvr, vr, "累計量 / 同時點均量"))
+    lvr = dual_grade(vr, last_avg_to, last["turnover_hkd"], cfg["vol_ratio"],
+                     cfg["pool_split_turnover"], allow_b=ok_cum)
+    fin = vr.notna().values & np.isfinite(vr).values
+    out.append(emit(last, fin & ok_cum, "成交量暴增", lvr, vr,
+                    "今日累計量 / 過去 20 日同時點平均累計量"))
+    out.append(emit(last, fin & ~ok_cum, "成交量暴增", lvr, vr,
+                    "累計量 / 同時點均量（歷史不足，暫用時段內插）"))
 
     # 換手率異常：只在盤後計算。分子改用日線成交量——1 分 K 加總相對日線量灌水約 2 倍，
     # 盤中又只有部分時段的量，換算出的換手率沒有可比性（見規劃書 5.3、5.4）。

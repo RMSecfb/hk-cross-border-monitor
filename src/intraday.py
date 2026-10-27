@@ -106,7 +106,12 @@ def main(force=False):
     snap.to_parquet(path("snapshot", day, f"snapshot_{stamp}.parquet"), index=False)
 
     # ---- 監控規則 ----
-    alerts = apply_cooldown(run_rules(bars, stats, uni, cfg, profile), cfg["cooldown_min"])
+    base = None
+    try:
+        base = bars_store.fetch_baseline(before=today)   # 過去 N 日同時點基準；取不到則退回時段內插法
+    except Exception as e:
+        log.warning(f"同時點基準取得失敗，改用時段內插法：{e}")
+    alerts = apply_cooldown(run_rules(bars, stats, uni, cfg, profile, baseline=base), cfg["cooldown_min"])
     all_f = path("alerts", f"alerts_{today:%Y%m%d}.csv")
     old = pd.read_csv(all_f, parse_dates=["time"]) if all_f.exists() else alerts.iloc[0:0]
     new = alerts[~alert_key(alerts).isin(set(alert_key(old)))].assign(found_at=stamp)

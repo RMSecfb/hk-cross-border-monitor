@@ -36,10 +36,21 @@ codes = [s[0] for s in specs]
 uni = pd.DataFrame({"code": codes, "name": "X", "vcm_pct": [None] * len(codes)})
 stats = pd.DataFrame({"code": codes, "prev_close": 100.0, "ma": 100.0, "avg_vol": 1e3,          # 均量刻意設小，確保倍數遠超紅燈，測的是成交額下限而非倍數
                       "avg_turnover": [s[1] for s in specs], "halted": False})
-a = run_rules(bars, stats, uni, cfg)
+# 同時點基準（B 軌需有基準檔才會開啟，見階段 4）
+base = pd.DataFrame([{"code": c, "m": m, "avg1": 10.0, "avg3": 30.0, "avgcum": 100.0,
+                      "n_short": 5, "n_long": 20} for c in codes for m in (600, 601)])
+a = run_rules(bars, stats, uni, cfg, baseline=base)
 got = set(a.loc[a["rule"] == "成交量暴增", "code"])
 for c, _, _, want, desc in specs:
     checks.append((f"{desc} → {'報' if want else '不報'}", (c in got) == want))
+
+# 沒有同時點基準時 B 軌關閉（過渡期：只跑 A 軌）
+a_nb = run_rules(bars, stats, uni, cfg)
+got_nb = set(a_nb.loc[a_nb["rule"] == "成交量暴增", "code"])
+checks += [
+    ("無基準檔時 A 軌照常", 51 in got_nb),
+    ("無基準檔時 B 軌關閉", not ({54, 55} & got_nb)),
+]
 
 # 舊的單軌格式仍可運作（向後相容）
 old = dict(cfg)

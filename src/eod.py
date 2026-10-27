@@ -143,6 +143,7 @@ def eod_for_day(day, raw, daily, uni, cfg):
     prev_stats = pd.read_csv(prev_f) if prev_f.exists() else make_stats(cfg, prev_day)
     prof_f = path("profile", "profile.csv")
     prof = pd.read_csv(prof_f, dtype={"bucket": str}) if prof_f.exists() else None
+    base = bars_store.fetch_baseline(before=day)      # 用不含當日的基準，與盤中同條件
     close_day = daily[daily["date"] == day].set_index("code")["close"]
     vol_day = daily[daily["date"] == day].set_index("code")["volume"]    # 換手率分子：日線成交量
 
@@ -151,7 +152,8 @@ def eod_for_day(day, raw, daily, uni, cfg):
     if ex_div:
         log.info(f"{day:%Y-%m-%d} 除息股 {len(ex_div)} 檔，價格類警報將加註")
     alerts = apply_cooldown(run_rules(bars, prev_stats, uni, cfg, prof, daily_close=close_day,
-                                      ex_div_codes=ex_div, daily_volume=vol_day), cfg["cooldown_min"])
+                                      ex_div_codes=ex_div, daily_volume=vol_day,
+                                      baseline=base), cfg["cooldown_min"])
     alerts.to_csv(path("report", f"eod_alerts_{day:%Y%m%d}.csv"), index=False, encoding="utf-8-sig")
     summary = alerts.pivot_table(index="rule", columns="level", values="code", aggfunc="count", fill_value=0)
     summary.to_csv(path("report", f"eod_summary_{day:%Y%m%d}.csv"), encoding="utf-8-sig")
@@ -165,8 +167,18 @@ def eod_for_day(day, raw, daily, uni, cfg):
         # ---- 1 分 K 歷史：存成本地檔，由 workflow 的 gh CLI 上傳為 Release 附件 ----
         try:
             bars_store.save_local(bars, day, stats_today)
+            # 同時點基準：含當日在內的近 20 日，供明天盤中直接使用（盤中只需抓這一個小檔）
+            hist, got = bars_store.load_history(bars_store.available_days(limit=25)[:20] or [day])
+            if day not in got:        # Release 尚未上傳當日檔，補上本地剛存的
+                today_df = bars_store.to_frame(bars, stats_today).assign(day=day)
+                hist = pd.concat([hist, today_df], ignore_index=True)
+                got = sorted(set(got) | {day})
+            bl = bars_store.build_baseline(hist)
+            if not bl.empty:
+                bars_store.save_baseline(bl, day)
+                log.info(f"同時點基準使用 {len(got)} 個交易日（3分鐘/連續放量取近 5 日、成交量暴增取近 20 日）")
         except Exception as e:
-            log.warning(f"1 分 K 存檔失敗（不影響當日監控）：{e}")
+            log.warning(f"1 分 K 存檔／基準計算失敗（不影響當日監控）：{e}")
         q = bars_store.quality(bars, daily[daily["date"] == day].set_index("code")["volume"])
         if q:
             log.info(f"資料品質 1分K加總÷日線量：中位數 {q['median']}、"

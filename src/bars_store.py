@@ -137,6 +137,97 @@ def expired_tags(today, keep_days=KEEP_DAYS):
     return [f"{TAG_PREFIX}{d:%Y%m%d}" for d in available_days(limit=200) if d < cut]
 
 
+# ---------------- 同時點基準（階段 4）----------------
+# 規則端需要的是「過去 N 日同一時點」的三個基準，不是原始 1 分 K。
+# 若每個盤中批次都去抓 20 天的原始檔（約 40 MB），下載量與時間都不划算，
+# 因此盤後算好一份精簡基準檔，與當日 1 分 K 放在同一個 Release，盤中只抓這一個檔。
+#   avg1   = 過去 5 日，該分鐘的平均成交量          → 連續放量
+#   avg3   = 過去 5 日，結束於該分鐘的 3 分鐘平均量 → 3 分鐘量暴增
+#   avgcum = 過去 20 日，09:30 至該分鐘的平均累計量 → 成交量暴增
+# 平均一律除以「該檔有交易的天數」而非有資料的筆數：沒有 K 線代表那一分鐘沒成交（視為 0），
+# 但整天停牌的日子要剔除，否則分母被壓低、復牌當天的倍數會失真。
+
+def _day_count(h):
+    """每檔有實際交易的天數（整日無量者不計入）"""
+    t = h.groupby(["code", "day"])["volume"].sum()
+    return t[t > 0].reset_index().groupby("code")["day"].nunique()
+
+
+def build_baseline(hist, days_short=5, days_long=20):
+    """由多日 1 分 K 算出同時點基準。hist 需含 code/m/volume/day。"""
+    if hist is None or hist.empty:
+        return pd.DataFrame(columns=["code", "m", "avg1", "avg3", "avgcum"])
+    hist = hist[["code", "m", "volume", "day"]]
+    all_days = sorted(hist["day"].unique())
+    short = hist[hist["day"].isin(all_days[-days_short:])]
+    long_ = hist[hist["day"].isin(all_days[-days_long:])]
+    n_s, n_l = _day_count(short), _day_count(long_)
+
+    # 每分鐘平均量
+    avg1 = short.groupby(["code", "m"])["volume"].sum().reset_index()
+    avg1["avg1"] = avg1["volume"] / avg1["code"].map(n_s)
+
+    # 結束於該分鐘的 3 分鐘平均量：把每筆分別記到 m、m+1、m+2 三個視窗再加總
+    w = pd.concat([short.assign(m=short["m"] + k) for k in (0, 1, 2)], ignore_index=True)
+    avg3 = w.groupby(["code", "m"])["volume"].sum().reset_index()
+    avg3["avg3"] = avg3["volume"] / avg3["code"].map(n_s)
+
+    # 09:30 至該分鐘的平均累計量。
+    # 不能直接用「同一分鐘跨日加總 ÷ 天數」：某分鐘只有 2/20 天有成交時，其餘 18 天的累計量
+    # 並不是 0（是前一筆的累計值），那樣算會把分母嚴重低估。先補成每分鐘都有的稠密矩陣再累計。
+    grid = range(int(long_["m"].min()), int(long_["m"].max()) + 1)
+    piv = (long_.pivot_table(index=["code", "day"], columns="m", values="volume",
+                             aggfunc="sum", fill_value=0)
+                .reindex(columns=grid, fill_value=0))
+    # 每一列是「某檔某日」，故 mean 的分母就是該檔有交易的天數
+    avgcum = (piv.cumsum(axis=1).groupby(level="code").mean()
+                 .stack().rename("avgcum").reset_index())
+
+    out = (avg1[["code", "m", "avg1"]]
+           .merge(avg3[["code", "m", "avg3"]], on=["code", "m"], how="outer")
+           .merge(avgcum[["code", "m", "avgcum"]], on=["code", "m"], how="outer"))
+    # 逐檔的可用天數：規則端據此判斷該檔是否已有足夠歷史可用同時點分母
+    # （新上市或長期停牌的股票，即使全市場已累積 20 天，它自己也可能只有 2 天）
+    out["n_short"] = out["code"].map(n_s).fillna(0).astype("int16")
+    out["n_long"] = out["code"].map(n_l).fillna(0).astype("int16")
+    out["code"] = out["code"].astype("int32")
+    out["m"] = out["m"].astype("int16")
+    for c in ("avg1", "avg3", "avgcum"):
+        out[c] = out[c].astype("float32")
+    return out.sort_values(["code", "m"]).reset_index(drop=True)
+
+
+def save_baseline(df, day):
+    f = path("baseline", f"baseline_{day:%Y%m%d}.parquet")
+    df.to_parquet(f, compression="zstd", index=False)
+    log.info(f"同時點基準 {f.name}：{df['code'].nunique()} 檔、{len(df):,} 列、"
+             f"{f.stat().st_size / 1e6:.1f} MB")
+    return f
+
+
+def fetch_baseline(before=None):
+    """取最近一個交易日的同時點基準（盤中用）。before 為 Timestamp 時只取早於該日者。"""
+    local = sorted((DATA / "baseline").glob("baseline_*.parquet")) if (DATA / "baseline").exists() else []
+    if before is not None:
+        local = [f for f in local if f.stem[-8:] < f"{pd.Timestamp(before):%Y%m%d}"]
+    if local:
+        return pd.read_parquet(local[-1])
+    if not enabled():
+        return None
+    for d in available_days(limit=10):
+        if before is not None and d >= pd.Timestamp(before).normalize():
+            continue
+        rel = _release(f"{TAG_PREFIX}{d:%Y%m%d}")
+        for a in (rel or {}).get("assets", []):
+            if a["name"].startswith("baseline_"):
+                r = requests.get(a["url"], headers=_headers() | {"Accept": "application/octet-stream"},
+                                 timeout=180)
+                if r.status_code == 200:
+                    log.info(f"取得同時點基準 {a['name']}")
+                    return pd.read_parquet(io.BytesIO(r.content))
+    return None
+
+
 # ---------------- 資料品質 ----------------
 def quality(bars, daily_volume):
     """1 分 K 加總 ÷ 日線量。理論上應接近 1，實測會在 0.28～6.49 之間跳動，

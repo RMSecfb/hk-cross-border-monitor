@@ -71,14 +71,18 @@ jobs:
           if [ -z "$f" ]; then echo "::notice::本次沒有 1 分 K 檔案，略過"; exit 0; fi
           day=$(basename "$f" .parquet); day=${day#bars_}
           tag="bars-$day"
+          # 同時點基準檔（盤中只抓這個小檔，不必下載 20 天的原始 1 分 K）
+          bl="data/baseline/baseline_$day.parquet"
+          [ -f "$bl" ] || bl=""
           if gh release view "$tag" >/dev/null 2>&1; then
-            gh release upload "$tag" "$f" --clobber
+            gh release upload "$tag" "$f" $bl --clobber
           else
-            gh release create "$tag" "$f" --title "1 分 K $day" --notes "自動產生，保留 30 天" --prerelease
+            gh release create "$tag" "$f" $bl --title "1 分 K $day" --notes "自動產生，保留 30 天" --prerelease
           fi
           # 確認附件確實存在，避免靜默失敗
           gh release view "$tag" --json assets --jq '.assets[].name' | grep -q "$(basename "$f")"
           echo "::notice::已上傳 $tag / $(basename "$f") ($(du -h "$f" | cut -f1))"
+          [ -n "$bl" ] && echo "::notice::已上傳 $(basename "$bl") ($(du -h "$bl" | cut -f1))"
           # 刪除超過 30 天的，連同 tag 一併清除
           cut=$(date -u -d "30 days ago" +%Y%m%d)
           for t in $(gh release list --limit 200 --json tagName --jq '.[].tagName' | grep '^bars-' || true); do
