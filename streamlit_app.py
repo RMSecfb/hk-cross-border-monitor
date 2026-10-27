@@ -411,9 +411,21 @@ def list_ai(day):
     return [(k, load_ai(day, k)) for k in sorted(keys) if load_ai(day, k)]
 
 
-def save_ai(day, key, text, model):
+def data_fingerprint(alerts_df):
+    """摘要所依據的資料指紋（筆數＋各等級筆數）。
+
+    AI 摘要會把「紅燈 704 筆」這種數字寫死在文字裡。補跑或改規則重算之後，舊摘要還是會被
+    讀出來顯示在新表格上方，數字卻全錯——呈報時這是最糟的失誤。存檔時記下指紋，顯示時比對。
+    """
+    if alerts_df is None or len(alerts_df) == 0:
+        return {"n": 0}
+    lv = alerts_df["level"].value_counts() if "level" in alerts_df.columns else {}
+    return {"n": int(len(alerts_df)), **{k: int(lv.get(k, 0)) for k in ("紅", "橙", "黃")}}
+
+
+def save_ai(day, key, text, model, fp=None):
     """存回 GitHub；同一資料時點再分析會覆蓋（提交紀錄保留舊版）"""
-    meta = {"day": day, "key": key, "text": text, "model": model,
+    meta = {"day": day, "key": key, "text": text, "model": model, "fingerprint": fp,
             "created_at": f"{dt.datetime.now(HKT):%Y-%m-%d %H:%M}"}
     path = f"data/ai_summary/{day}/{key}.json"
     _, sha = gh.get_file(path)
@@ -439,6 +451,9 @@ def summary_panel(alerts_df, snap_df, is_eod=False, rep_day_str="", day_key="", 
     label = "盤後監控摘要" if is_eod else "盤中監控摘要"
     can_store = bool(ai_day and ai_key and ai_key != "-")
     saved = load_ai(ai_day, ai_key) if can_store else None
+    fp_now = data_fingerprint(alerts_df)
+    # 舊摘要沒有指紋欄（在這個功能之前產生的），一律視為可能過時
+    stale = bool(saved) and saved.get("fingerprint") != fp_now
 
     with st.container(border=True):
         st.markdown(f"**📋 {label}**")
@@ -459,6 +474,12 @@ def summary_panel(alerts_df, snap_df, is_eod=False, rep_day_str="", day_key="", 
                 meta = st.session_state.get(k_meta)
                 when = f"・{_ai_label(ai_key)}・產生於 {meta['created_at']}" if meta and can_store else ""
                 st.caption(f"🤖 由 Groq AI 生成（模型 {st.session_state.get(k_model, '-')}）{when}")
+                if stale and st.session_state.get(k_txt) == saved.get("text"):
+                    was = saved.get("fingerprint")
+                    detail = (f"（當時 {was['n']:,} 筆、現在 {fp_now['n']:,} 筆）"
+                              if isinstance(was, dict) and "n" in was else "（這份摘要產生時尚未記錄資料筆數）")
+                    st.warning(f"⚠️ 這份摘要產生之後，底下的資料已經重算過{detail}，"
+                               "文中的數字可能與現在的表格對不起來。請按「🔄 重新分析」更新。")
             if st.session_state.get(k_warn):
                 st.warning(st.session_state[k_warn])
         with col2:
@@ -474,7 +495,7 @@ def summary_panel(alerts_df, snap_df, is_eod=False, rep_day_str="", day_key="", 
                 if used and can_store:
                     if gh.ready:
                         try:
-                            st.session_state[k_meta] = save_ai(ai_day, ai_key, txt_ai, used)
+                            st.session_state[k_meta] = save_ai(ai_day, ai_key, txt_ai, used, fp_now)
                         except Exception as e:
                             st.session_state[k_warn] = f"AI 分析已產生，但儲存失敗：{e}"
                     else:
