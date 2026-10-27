@@ -55,7 +55,10 @@ stats = pd.DataFrame({
 })
 uni = pd.DataFrame({"code": codes, "name": [f"測試{c}" for c in codes], "vcm_pct": 10.0})
 
-a = run_rules(bars, stats, uni, cfg, profile=None, daily_close=None, ex_div_codes={6, 7})
+# 量能指標需要同時點基準才會計算（歷史不足就不報，不退回舊分母），故供一份合成基準
+base = pd.DataFrame([{"code": c, "m": m, "avg1": 1000.0, "avg3": 3000.0, "avgcum": 10000.0,
+                      "n_short": 5, "n_long": 20} for c in codes for m in (570, 571)])
+a = run_rules(bars, stats, uni, cfg, daily_close=None, ex_div_codes={6, 7}, baseline=base)
 got = {(int(r.code), r.rule): r for r in a.itertuples()}
 
 

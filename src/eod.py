@@ -153,8 +153,9 @@ def eod_for_day(day, raw, daily, uni, cfg, update_prof=True, build_base=True, ba
     prev_day = load_daily(day - pd.Timedelta(days=1), 1)["date"].max()
     prev_f = path("stats", f"stats_{prev_day:%Y%m%d}.csv")
     prev_stats = pd.read_csv(prev_f) if prev_f.exists() else make_stats(cfg, prev_day)
-    prof_f = path("profile", "profile.csv")
-    prof = pd.read_csv(prof_f, dtype={"bucket": str}) if prof_f.exists() else None
+    if "halted" not in prev_stats:          # 舊格式基準檔沒有停牌欄，重算一份
+        log.info(f"stats_{prev_day:%Y%m%d}.csv 為舊格式（無 halted），重新產生")
+        prev_stats = make_stats(cfg, prev_day)
     if isinstance(baseline, str) and baseline == "auto":
         try:
             base = bars_store.fetch_baseline(before=day)  # 用不含當日的基準，與盤中同條件
@@ -170,7 +171,7 @@ def eod_for_day(day, raw, daily, uni, cfg, update_prof=True, build_base=True, ba
     ex_div = set(today_row.loc[today_row["dividends"] > 0, "code"]) if "dividends" in today_row else set()
     if ex_div:
         log.info(f"{day:%Y-%m-%d} 除息股 {len(ex_div)} 檔，價格類警報將加註")
-    alerts = apply_cooldown(run_rules(bars, prev_stats, uni, cfg, prof, daily_close=close_day,
+    alerts = apply_cooldown(run_rules(bars, prev_stats, uni, cfg, daily_close=close_day,
                                       ex_div_codes=ex_div, daily_volume=vol_day,
                                       baseline=base), cfg["cooldown_min"])
     alerts.to_csv(path("report", f"eod_alerts_{day:%Y%m%d}.csv"), index=False, encoding="utf-8-sig")

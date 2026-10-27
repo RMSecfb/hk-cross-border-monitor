@@ -64,6 +64,7 @@ checks += [
     ("3 分鐘量暴增每檔只一筆（t*）", (a["rule"] == "3分鐘量暴增").sum() <= len(codes)),
     ("說明欄指出用的是同時點分母",
      62 in v3.index and "過去 5 日同時點" in v3.loc[62, "detail"]),
+    ("說明欄不再出現「歷史不足」的退回字樣", not a["detail"].str.contains("歷史不足").any()),
 ]
 
 # 成交量暴增：今日 10:09 累計 = 9×1,000+10,000 = 19,000（61）與 19,000（62）→ 1 倍，不應觸發
@@ -74,9 +75,8 @@ checks.append(("成交量暴增：與歷史同時點累計相同 → 不觸發",
 bars5 = bars.copy()
 bars5["volume"] = bars5["volume"] * 5
 a5 = run_rules(bars5, stats, uni, cfg, baseline=bl)
-d5 = set(a5.loc[a5["rule"] == "成交量暴增", "detail"])
-checks.append((f"歷史只有 5 天 → 成交量暴增仍走退回路徑（需 {cfg['min_hist_days_cum']} 天）",
-               all("歷史不足" in x for x in d5) if d5 else True))
+checks.append((f"歷史只有 5 天 → 成交量暴增不計算（需 {cfg['min_hist_days_cum']} 天）",
+               "成交量暴增" not in set(a5["rule"])))
 
 # 12 天歷史 → 啟用同時點累計分母
 H12 = list(pd.date_range("2026-10-06", periods=12, freq="B"))
@@ -92,11 +92,10 @@ checks += [
      len(vr12) == 2 and all("過去 20 日同時點" in x for x in vr12["detail"])),
 ]
 
-# 無基準檔 → 自動退回時段內插法，且說明欄標示
-a0 = run_rules(bars5, stats, uni, cfg, profile=None, baseline=None)
-d0 = set(a0.loc[a0["rule"] == "成交量暴增", "detail"])
-checks.append(("無基準檔 → 退回時段內插並於說明標示",
-               any("歷史不足" in x for x in d0)))
+# 無基準檔 → 三個量能指標都不產生警報
+a0 = run_rules(bars5, stats, uni, cfg, baseline=None)
+checks.append(("無基準檔 → 量能指標一筆都不報",
+               not ({"成交量暴增", "3分鐘量暴增", "連續放量"} & set(a0["rule"]))))
 
 # 基準檔為空 DataFrame 也要能退回，不可拋例外
 try:

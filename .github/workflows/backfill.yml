@@ -12,6 +12,10 @@ on:
         description: "把補到的 1 分 K 上傳為 Release（供同時點分母累積歷史）"
         type: boolean
         default: true
+      publish_baseline:
+        description: "補完後發布同時點基準（量能三指標的分母；不勾則它們在下次盤後批次前都不會計算）"
+        type: boolean
+        default: false
       rebuild_profile:
         description: "重建分鐘量基準（危險：會先清空 profile.csv，只在它壞掉時才勾）"
         type: boolean
@@ -65,6 +69,20 @@ jobs:
             n=$((n+1))
           done
           echo "::notice::共上傳 $n 天的 1 分 K"
+
+      # 發布基準＝讓量能三指標在下一次盤中批次就改用同時點分母。
+      # 預設不做，讓你先看過補跑出來的報告再決定；平常這一步由每日盤後批次自動完成。
+      - if: inputs.publish_baseline
+        name: 建立並發布同時點基準
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -e
+          f=$(python src/publish_baseline.py | tail -1)
+          day=${f#baseline_}; day=${day%.parquet}
+          gh release upload "bars-$day" "data/baseline/$f" --clobber
+          gh release view "bars-$day" --json assets --jq '.assets[].name' | grep -q "$f"
+          echo "::notice::已發布 $f 至 bars-$day（下次盤中批次起，量能三指標改用同時點分母）"
 
       - name: 存回 repo
         run: bash .github/commit.sh "backfill ${{ inputs.start }}~${{ inputs.end }}"

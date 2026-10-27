@@ -44,19 +44,16 @@ got = set(a.loc[a["rule"] == "成交量暴增", "code"])
 for c, _, _, want, desc in specs:
     checks.append((f"{desc} → {'報' if want else '不報'}", (c in got) == want))
 
-# 沒有同時點基準時 B 軌關閉（過渡期：只跑 A 軌）
+# 沒有同時點基準時三個量能指標一律不計算（不退回舊分母）
 a_nb = run_rules(bars, stats, uni, cfg)
-got_nb = set(a_nb.loc[a_nb["rule"] == "成交量暴增", "code"])
-checks += [
-    ("無基準檔時 A 軌照常", 51 in got_nb),
-    ("無基準檔時 B 軌關閉", not ({54, 55} & got_nb)),
-]
+checks.append(("無基準檔時量能指標完全不報",
+               not ({"成交量暴增", "3分鐘量暴增", "連續放量"} & set(a_nb["rule"]))))
 
 # 舊的單軌格式仍可運作（向後相容）
 old = dict(cfg)
 old["vol_ratio"] = {"黃": 3, "橙": 5, "紅": 10}
-a2 = run_rules(bars, stats, uni, old)
-checks.append(("舊單軌格式仍可運作（全部符合倍數者都報）",
+a2 = run_rules(bars, stats, uni, old, baseline=base)
+checks.append(("舊單軌格式仍可運作（無成交額下限，全部符合倍數者都報）",
                set(a2.loc[a2["rule"] == "成交量暴增", "code"]) == set(codes)))
 
 # ruamel 巢狀寫回不會破壞註解與其他鍵

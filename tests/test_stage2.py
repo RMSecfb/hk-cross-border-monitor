@@ -57,6 +57,8 @@ uni1 = pd.DataFrame({"code": [21], "name": "X", "vcm_pct": [None]})
 a_intra = run(bars, mkstats([21]), uni1)
 a_eod = run(bars, mkstats([21]), uni1,
             daily_close=pd.Series({21: 100.0}), daily_volume=pd.Series({21: 500_000_000.0}))
+checks.append(("沒有同時點基準時不產生成交量暴增",
+               "成交量暴增" not in set(a_intra["rule"]) and "成交量暴增" not in set(a_eod["rule"])))
 checks += [
     ("換手率盤中不計算", "換手率異常" not in set(a_intra["rule"])),
     ("換手率盤後計算", "換手率異常" in set(a_eod["rule"])),
@@ -100,12 +102,12 @@ for code, _, _, _, _, _, _, want, desc in specs:
     checks.append((f"CAS {desc} → {want or '不報'}", got == want))
 
 # ---------- 4. 每批次每檔取 max 一筆 ----------
-prof = pd.DataFrame({"code": [41] * 3, "bucket": ["1000", "1000", "1000"],
-                     "vol_per_min": [1000.0] * 3, "n": [20] * 3}).drop_duplicates(["code", "bucket"])
+base41 = pd.DataFrame([{"code": 41, "m": m, "avg1": 1000.0, "avg3": 3000.0, "avgcum": 10000.0,
+                        "n_short": 5, "n_long": 20} for m in range(600, 620)])
 rows = [bar(41, f"10:{m:02d}", 100, 100_000) for m in range(0, 20)]
 bars = pd.DataFrame(rows)
 uni = pd.DataFrame({"code": [41], "name": "X", "vcm_pct": [None]})
-a = run(bars, mkstats([41]), uni, profile=prof)
+a = run(bars, mkstats([41]), uni, baseline=base41)
 for r in ["3分鐘量暴增", "連續放量"]:
     checks.append((f"{r} 每檔只留一筆", (a["rule"] == r).sum() <= 1))
 
