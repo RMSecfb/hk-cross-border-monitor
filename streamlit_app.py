@@ -1069,6 +1069,15 @@ with tab_param:
     vcm_cd = pd.DataFrame([{"規則": r, "冷卻（分）": cd.get(r)} for r in EXTRA_COOLDOWN])
     vcm_cd_new = st.data_editor(vcm_cd, hide_index=True, use_container_width=True, key="ed_vcmcd", disabled=["規則"])
 
+    st.subheader("風險分數權重")
+    st.caption("每檔每項監控取當日最高等級，依下表給分後加總，上限 100 分。"
+               "「今日高風險排行」與盤後預警列表、趨勢追蹤都用這組分數。")
+    sw = cfg.get("score_weights", {})
+    w_df = pd.DataFrame([{"等級": lv, "分數": float(sw.get(lv, 0))} for lv in ("紅", "橙", "黃")])
+    w_new = st.data_editor(w_df, hide_index=True, use_container_width=True, key="ed_sw",
+                           disabled=["等級"],
+                           column_config={"分數": st.column_config.NumberColumn(min_value=0, max_value=100)})
+
     st.subheader("其他參數")
     o_df = pd.DataFrame([{"鍵": k, "參數": d, "設定值": float(cfg.get(k, 0)), "單位": unit}
                          for k, (d, unit) in OTHER_INFO.items() if k in cfg])
@@ -1100,6 +1109,12 @@ with tab_param:
         if pd.notna(n["冷卻（分）"]) and float(n["冷卻（分）"]) != float(o["冷卻（分）"]):
             cd_edits.append((o["規則"], n["冷卻（分）"]))
             changes.append((f"{o['規則']}・冷卻", o["冷卻（分）"], num(n["冷卻（分）"])))
+    for (_, o), (_, n) in zip(w_df.iterrows(), w_new.iterrows()):
+        if pd.notna(n["分數"]) and float(n["分數"]) != float(o["分數"]):
+            rule_edits.append(("score_weights", o["等級"], n["分數"]))   # 存檔時走 doc["score_weights"][等級]
+            changes.append((f"風險分數權重・{o['等級']}", num(o["分數"]), num(n["分數"])))
+    if not (float(w_new.loc[2, "分數"]) <= float(w_new.loc[1, "分數"]) <= float(w_new.loc[0, "分數"])):
+        errors.append("風險分數權重：需 黃 ≤ 橙 ≤ 紅")
     for (_, o), (_, n) in zip(o_df.iterrows(), o_new.iterrows()):
         if pd.notna(n["設定值"]) and float(n["設定值"]) != float(o["設定值"]):
             other_edits.append((o["鍵"], n["設定值"]))
