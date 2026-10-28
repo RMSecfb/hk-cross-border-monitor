@@ -14,16 +14,25 @@ meta 欄位：
   pdf_cols     PDF 明細要顯示的欄位（省略則用全部；欄位太多會擠成多行）
   pdf_levels   PDF 明細只收這些等級（省略則全收）
   pdf_rows     PDF 明細最多列數
+  stats_first  True 時統計表排在摘要之前（今日高風險排行用）
+  titles       覆寫區塊標題，如 {"detail": "今日高風險排行"}
 """
 import io
 
 LEVELS = ["紅", "橙", "黃"]
+SEC = {"stats": "監控概況", "summary": "監控摘要", "rule": "規則分布", "detail": "預警列表"}
+
+
+def _sec(meta, key):
+    return (meta.get("titles") or {}).get(key, SEC[key])
 HDR_BLUE = "1F4E79"
 LV_FILL = {"紅": "FFCCCC", "橙": "FFE0B2", "黃": "FFF9C4"}
 # PDF 明細欄寬偏好（mm），未列出的用預設值
 COL_MM = {"股票代碼": 14, "股票名稱": 26, "等級": 10, "監控類型": 22, "指標值": 32,
           "閾值": 18, "風險分數": 12, "連續上榜(日)": 14, "近5日上榜(日)": 14,
-          "時間": 16, "說明": 28, "當日觸發次數": 12}
+          "時間": 16, "說明": 28, "當日觸發次數": 12, "備註": 24,
+          "代碼": 14, "名稱": 26, "紅燈數": 10, "橙燈數": 10, "黃燈數": 10,
+          "現價": 14, "漲跌幅%": 14, "成交額(萬)": 18, "觸發規則": 46}
 
 
 # ---------------- Excel ----------------
@@ -49,24 +58,30 @@ def build_excel(meta):
     ws["A2"].font = Font(size=10, color="666666")
     ws["A2"].alignment = Alignment(horizontal="center")
 
-    r = 4
-    for para in [p for p in meta["summary_text"].split("\n") if p.strip()]:
-        ws.merge_cells(start_row=r, start_column=1, end_row=r, end_column=5)
-        c = ws.cell(r, 1, para.strip())
-        c.alignment = Alignment(wrap_text=True, vertical="top")
-        ws.row_dimensions[r].height = 32
-        r += 1
+    def write_summary(r):
+        for para in [p for p in meta["summary_text"].split("\n") if p.strip()]:
+            ws.merge_cells(start_row=r, start_column=1, end_row=r, end_column=5)
+            c = ws.cell(r, 1, para.strip())
+            c.alignment = Alignment(wrap_text=True, vertical="top")
+            ws.row_dimensions[r].height = 32
+            r += 1
+        return r + 1
 
-    r += 1
-    ws.cell(r, 1, "統計項目").fill = hdr_fill
-    ws.cell(r, 1).font = hdr_font
-    ws.cell(r, 2, "數值").fill = hdr_fill
-    ws.cell(r, 2).font = hdr_font
-    r += 1
-    for k, v in meta["stats"]:
-        ws.cell(r, 1, k).border = thin
-        ws.cell(r, 2, v).border = thin
+    def write_stats(r):
+        ws.cell(r, 1, "統計項目").fill = hdr_fill
+        ws.cell(r, 1).font = hdr_font
+        ws.cell(r, 2, "數值").fill = hdr_fill
+        ws.cell(r, 2).font = hdr_font
         r += 1
+        for k, v in meta["stats"]:
+            ws.cell(r, 1, k).border = thin
+            ws.cell(r, 2, v).border = thin
+            r += 1
+        return r
+
+    r = 4
+    r = write_stats(r) + 1 if meta.get("stats_first") else write_summary(r)
+    r = write_summary(r) if meta.get("stats_first") else write_stats(r)
 
     rp = meta["rule_pivot"]
     if rp is not None and not rp.empty:
@@ -160,21 +175,29 @@ def build_pdf(meta):
         return t
 
     story = [Paragraph(meta["title"], st_title), Paragraph(meta["day_label"], st_sub)]
+    num = iter(["一", "二", "三", "四"])
 
-    # 一、摘要文字放在所有表格之前
-    story.append(Paragraph("一、監控摘要", st_h))
-    for para in [p for p in meta["summary_text"].split("\n") if p.strip()]:
-        story.append(Paragraph(para.strip(), st_body))
+    def stats_block():
+        sd = [["統計項目", "數值"]] + [[k, str(v)] for k, v in meta["stats"]]
+        t = grid(sd, [80 * mm, 40 * mm])
+        t.setStyle(TableStyle([("ALIGN", (1, 0), (1, -1), "CENTER")]))
+        return [Spacer(1, 3 * mm), t]
 
-    sd = [["統計項目", "數值"]] + [[k, str(v)] for k, v in meta["stats"]]
-    t = grid(sd, [80 * mm, 40 * mm])
-    t.setStyle(TableStyle([("ALIGN", (1, 0), (1, -1), "CENTER")]))
-    story += [Spacer(1, 3 * mm), t]
+    def summary_block():
+        out = [Paragraph(f"{next(num)}、{_sec(meta, 'summary')}", st_h)]
+        out += [Paragraph(p.strip(), st_body)
+                for p in meta["summary_text"].split("\n") if p.strip()]
+        return out
 
-    # 二、規則分布
+    if meta.get("stats_first"):          # 統計在前：畫面上方那一排指標先呈現
+        story += [Paragraph(f"{next(num)}、{_sec(meta, 'stats')}", st_h)] + stats_block()
+        story += summary_block()
+    else:
+        story += summary_block() + stats_block()
+
     rp = meta["rule_pivot"]
     if rp is not None and not rp.empty:
-        story.append(Paragraph("二、規則分布", st_h))
+        story.append(Paragraph(f"{next(num)}、{_sec(meta, 'rule')}", st_h))
         rd = [["規則", *LEVELS, "合計"]]
         for name, row in rp.iterrows():
             rd.append([name, *[str(int(row.get(lv, 0))) for lv in LEVELS], str(int(row.get("合計", 0)))])
@@ -184,7 +207,7 @@ def build_pdf(meta):
 
     # 三、明細
     det, nmax = meta["detail"], meta.get("pdf_rows", 200)
-    story.append(Paragraph("三、預警列表", st_h))
+    story.append(Paragraph(f"{next(num)}、{_sec(meta, 'detail')}", st_h))
     if meta.get("detail_note"):
         story.append(Paragraph(meta["detail_note"], st_note))
     # PDF 寬度有限，欄位太多會把每列擠成好幾行；只放重點欄位，完整欄位在 Excel

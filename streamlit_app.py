@@ -613,6 +613,42 @@ def eod_meta(rep, day_str, summary_text):
                 pdf_rows=200)
 
 
+def rank_meta(disp, cols_show, day_str, until_label, min_score, top_n, n_hit, alerts_df, snap_df,
+              ai_meta=None):
+    """今日高風險排行的報告 meta。
+
+    版面：第一區塊是畫面上方那排指標（取得行情檔數、資料截至、紅橙黃），
+    第二區塊才是排行本身——摘要（規則摘要，有 AI 分析就一併附上）、篩選條件、明細表。
+    """
+    lv = alerts_df["level"].value_counts() if not alerts_df.empty and "level" in alerts_df else {}
+    stats = [("取得行情檔數", f"{len(snap_df):,} / {status.get('stocks_total', len(snap_df)):,}"),
+             ("資料截至", until_label)]
+    stats += [(f"{LEVEL_LABEL[k]}（盤中）", int(lv.get(k, 0))) for k in LEVELS]
+    stats += [("風險分數 ≥", min_score), ("符合檔數", n_hit), ("本報告顯示", f"前 {min(top_n, n_hit)} 檔")]
+
+    txt = _rule_summary(alerts_df, snap_df, False, day_str, until_label).replace("**", "")
+    if ai_meta and ai_meta.get("text"):
+        txt += f"\n\n【AI 分析（{ai_meta.get('model', '-')}・產生於 {ai_meta.get('created_at', '-')}）】\n" \
+               + ai_meta["text"].replace("**", "")
+
+    # 規則分布只取上榜這些股票，才對得上這份排行
+    codes = set(disp["代碼"].map(lambda c: int(c)))
+    sub = alerts_df[alerts_df["code"].isin(codes)] if not alerts_df.empty else alerts_df
+    rp = (sub.rename(columns={"level": "等級", "rule": "監控類型"})
+             .pipe(lambda d: rule_pivot(d, "監控類型", "code")) if not sub.empty else pd.DataFrame())
+
+    return dict(title="港股交易監控　今日高風險排行", day_label=f"{day_str}　資料截至 {until_label}",
+                summary_text=txt, stats=stats, stats_first=True,
+                titles={"summary": "今日高風險排行　監控摘要", "rule": "上榜標的的規則分布",
+                        "detail": "今日高風險排行"},
+                rule_pivot=rp, detail=disp[cols_show],
+                detail_note=f"風險分數 ≥ {min_score}，依分數由高到低顯示前 {top_n} 檔，"
+                            f"共 {n_hit} 檔符合。每檔每項監控取當日最高等級計分，上限 100。",
+                pdf_cols=[c for c in ["代碼", "名稱", "風險分數", "紅燈數", "橙燈數", "黃燈數",
+                                      "現價", "漲跌幅%", "成交額(萬)", "觸發規則"] if c in cols_show],
+                pdf_rows=int(top_n))
+
+
 def download_panel(kind, day_key, meta_fn, n_rows):
     """產生 Excel 與 PDF 後提供下載。資料量大時 Excel 需要數秒，所以按鈕觸發而非每次重算。"""
     import report_export
@@ -633,7 +669,7 @@ def download_panel(kind, day_key, meta_fn, n_rows):
                 st.error(f"產生失敗：{e}")
                 cur = {}
     if cur.get("day") == day_key:
-        stem = f"hk_monitor_{'eod' if kind == 'eod' else 'intraday'}_{day_key}"
+        stem = f"hk_monitor_{ {'eod': 'eod', 'rank': 'rank'}.get(kind, 'intraday') }_{day_key}"
         c2.download_button("📥 Excel", cur["xlsx"], f"{stem}.xlsx", key=f"dx_{kind}",
                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
         c3.download_button("📄 PDF", cur["pdf"], f"{stem}.pdf", key=f"dp_{kind}",
@@ -739,6 +775,13 @@ with tab_rank:
             st.dataframe(sty.format({"風險分數": "{:.0f}", "現價": "{:.3f}",
                                      "漲跌幅%": "{:+.2f}", "成交額(萬)": "{:,.0f}"}, na_rep="-"),
                          hide_index=True, use_container_width=True, height=h(len(hi_risk), 600))
+
+            n_hit = int((score_today["score"] >= min_score).sum())
+            download_panel("rank", f"{ymd}_{until}_{min_score}_{top_n}",
+                           lambda: rank_meta(disp, cols_show, day, until, int(min_score), int(top_n),
+                                             n_hit, alerts_all, snap,
+                                             load_ai(ymd, until.replace(":", ""))),
+                           len(hi_risk))
         else:
             # 若無 score 檔，退而求其次顯示漲跌幅排行
             st.info("盤後風險分數尚未產生，以下顯示即時漲幅排行（盤後批次完成後改為風險分數排行）。")
