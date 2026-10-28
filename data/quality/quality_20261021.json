@@ -1,8 +1,8 @@
 {
- "compared": 2055,
- "median": 1.29,
- "p05": 0.0,
- "p95": 3.52,
- "over_2x": 513,
- "under_0p5x": 320
+ "compared": 1,
+ "median": 0.67,
+ "p05": 0.67,
+ "p95": 0.67,
+ "over_2x": 0,
+ "under_0p5x": 0
 }
