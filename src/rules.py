@@ -94,9 +94,10 @@ def emit(df, mask, rule, levels, value, detail):
     ok = np.asarray(mask, dtype=bool) & pd.notna(lv)
     if not ok.any():
         return pd.DataFrame(columns=COLS)
+    det = np.asarray(detail)[ok] if np.ndim(detail) else detail   # 逐列說明文字
     return pd.DataFrame({"time": df["time"].values[ok], "code": df["code"].values[ok], "rule": rule,
                          "level": lv[ok], "value": np.round(np.asarray(value, dtype=float)[ok], 2),
-                         "detail": detail})
+                         "detail": det})
 
 
 def run_rules(bars, stats, universe, cfg, daily_close=None, ex_div_codes=None,
@@ -179,18 +180,53 @@ def run_rules(bars, stats, universe, cfg, daily_close=None, ex_div_codes=None,
 
     # ---- 3. 3 分鐘量暴增、連續放量（以時間視窗計算）----
     bt = b.set_index("time")
-    vol3 = bt.groupby("code", sort=False)["volume"].rolling("3min").sum().values
+    gb3 = bt.groupby("code", sort=False)["volume"]
+    vol3 = gb3.rolling("3min").sum().values
+    cnt3 = gb3.rolling("3min").count().values          # 這 3 分鐘實際有幾根 K 線
+    cnt15 = gb3.rolling("15min").count().values        # 近 15 分鐘有成交的分鐘數
     split = cfg["pool_split_turnover"]
     # 逐檔閘門：該檔自己累積的天數不足（新上市、長期停牌、或不在 1 分 K 收錄範圍）就不計算
     min_s = cfg["min_hist_days"]
     tp3 = (b["avg3"].notna() & (b["n_short"] >= min_s)) if use_tp else pd.Series(False, index=b.index)
-    r3 = vol3 / b["avg3"].replace(0, np.nan) if use_tp else np.full(len(b), np.nan)
-    # t* = 今日該批次內 3 分鐘滾動量最大的視窗結束時點，倍數只在該時點算一筆
+
     v3 = pd.Series(vol3, index=b.index)
-    at_max = (v3 > 0) & (v3 == v3.groupby(b["code"]).transform("max"))
-    lv3 = dual_grade(r3, avg_to, b["turnover_hkd"], cfg["vol_3m"], split)
-    out.append(emit(b, tp3 & at_max, "3分鐘量暴增", lv3, r3,
-                    "今日 t* 的 3 分鐘量 / 過去 5 日同時點平均"))
+    r_hist = v3 / b["avg3"].replace(0, np.nan) if use_tp else pd.Series(np.nan, index=b.index)
+    # 今日開盤以來每 3 分鐘的均量（盤中自然只算到當下）：用來判斷「相對今天自己」有多突出
+    # shift(3)：排除當下這個窗格與它重疊的兩根，否則爆量會把自己的比較基準一起拉高
+    # （開盤後不久的爆量尤其明顯：樣本少，一波大量就佔掉均值的一半）。
+    # min_periods=3 表示開盤約 5 分鐘後才開始判定；再嚴就會讓開盤後十分鐘變成盲區。
+    cum3 = v3.groupby(b["code"]).transform(lambda x: x.shift(3).expanding(min_periods=3).mean())
+    r_today = v3 / cum3
+    # 這 3 分鐘「每一分鐘」都要放量：取窗格內「該分鐘量 ÷ 該分鐘歷史均量」的最小值。
+    # 正常股票的爆量多半是一根尖峰夾在兩根平靜分鐘之間，這條過不了；要持續下單才過得了。
+    r1m = b["volume"] / b["avg1"].replace(0, np.nan) if use_tp else pd.Series(np.nan, index=b.index)
+    permin = b.assign(_r=r1m).set_index("time").groupby("code", sort=False)["_r"].rolling("3min").min().values
+
+    # 先逐分鐘驗門檻，再從通過的分鐘裡挑最嚴重的一筆。
+    # 舊版相反：先挑「成交量最大」那一分鐘再驗門檻，等於整天只抽驗一根窗格，
+    # 10/28 實測漏掉 82% 本來就符合條件的標的（真正的異常常不在量最大的那一分鐘）。
+    gate = cfg["vol_3m_gate"]
+    lv3 = dual_grade(r_today, avg_to, b["turnover_hkd"], cfg["vol_3m"], split)
+    # 流動性閘門：近 15 分鐘每分鐘都有成交。但開盤與午休後的前 15 分鐘往前看會跨過休市，
+    # 不可能湊滿 15 根，若直接套用會讓 09:30-09:45 與 13:00-13:15 變成盲區——
+    # 而那正是最活躍的時段（10/28 的 03800 真實異常就發生在 13:06）。改為以該時段已開盤的分鐘數為上限。
+    tmin = tod(b["time"]).dt.total_seconds() / 60
+    elapsed = np.where(tmin < 720, tmin - 570 + 1, tmin - 780 + 1)
+    need15 = np.minimum(gate["traded_min"], np.maximum(elapsed, 1))
+    ok3 = (tp3 & (cnt3 >= 3) & (cnt15 >= need15)
+           & (r_hist >= gate["hist_min"]) & (r_today >= gate["today_min"])
+           & (pd.Series(permin, index=b.index) >= gate["permin_min"])
+           & pd.notna(pd.Series(lv3, index=b.index))).fillna(False)
+    best3 = pd.Series(False, index=b.index)
+    if ok3.any():
+        cand = pd.DataFrame({"code": b.loc[ok3, "code"],
+                             "o": pd.Series(lv3, index=b.index)[ok3].map(LEVEL_RANK),
+                             "v": r_today[ok3]})
+        best3.loc[cand.sort_values(["o", "v"], ascending=[True, False])
+                      .drop_duplicates("code").index] = True
+    det3 = ("最近 3 分鐘量 = 今日均量的 " + r_today.round(1).astype(str)
+            + " 倍、過去 5 日同時點的 " + r_hist.round(0).astype(str) + " 倍").values
+    out.append(emit(b, best3, "3分鐘量暴增", lv3, r_today, det3))
 
     n = cfg["vol_streak_minutes"]
     den1 = b["avg1"].replace(0, np.nan) if use_tp else pd.Series(np.nan, index=b.index)

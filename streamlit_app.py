@@ -981,8 +981,8 @@ RULE_INFO = {  # 參數鍵: (監控項目, 單位, 適用範圍, Excel 出處)
     "cas_dev_thin": ("收市競價異常（冷門股）", "%", "20 日均成交額 < 1,000 萬（盤後）；橙紅另需金額條件", "價格異常"),
     "vol_ratio.A": ("成交量暴增（熱門股 A 軌）", "倍", "20 日均成交額 ≥ 1,000 萬", "成交量異常"),
     "vol_ratio.B": ("成交量暴增（冬眠股 B 軌）", "倍", "20 日均成交額 < 1,000 萬", "成交量異常"),
-    "vol_3m.A": ("3 分鐘成交量暴增（熱門股 A 軌）", "倍", "20 日均成交額 ≥ 1,000 萬", "成交量異常"),
-    "vol_3m.B": ("3 分鐘成交量暴增（冬眠股 B 軌）", "倍", "20 日均成交額 < 1,000 萬", "成交量異常"),
+    "vol_3m.A": ("3 分鐘量暴增（熱門股 A 軌）", "倍", "vs 今日均量；20 日均成交額 ≥ 1,000 萬", "成交量異常"),
+    "vol_3m.B": ("3 分鐘量暴增（冬眠股 B 軌）", "倍", "vs 今日均量；20 日均成交額 < 1,000 萬", "成交量異常"),
     "vol_streak": ("連續放量", "倍/分鐘", "活躍股（單軌）", "成交量異常"),
     "turnover": ("換手率異常", "%", "全市場（需股本資料，僅盤後）", "成交量異常"),
     "vcm_ratio": ("VCM 預警", "佔門檻比例", "VCM 名單；09:45–12:00、13:15–15:40", "VCM與市場機制"),
@@ -996,6 +996,10 @@ OTHER_INFO = {
     "max_prev_gap_min": ("1 分鐘急漲急跌：上一根距今超過此值不計算", "分鐘"),
     "max_ref_gap_5m_min": ("5 分鐘急漲急跌：參考價距今超過此值不計算", "分鐘"),
     "open_window_min": ("開盤價異常：第一根 K 線須在 09:30 後幾分鐘內", "分鐘"),
+    "vol_3m_gate.hist_min": ("3 分鐘量暴增閘門：≥ 過去 5 日同時點的幾倍", "倍"),
+    "vol_3m_gate.today_min": ("3 分鐘量暴增閘門：≥ 今日每 3 分鐘均量的幾倍", "倍"),
+    "vol_3m_gate.permin_min": ("3 分鐘量暴增閘門：每一分鐘都 ≥ 該分鐘歷史均量的幾倍", "倍"),
+    "vol_3m_gate.traded_min": ("3 分鐘量暴增閘門：近幾分鐘須每分鐘有成交", "分鐘"),
     "min_hist_days": ("同時點分母：3分鐘量暴增／連續放量所需天數", "交易日"),
     "min_hist_days_cum": ("同時點分母：成交量暴增所需天數", "交易日"),
     "pool_split_turnover": ("量能雙軌 A／B 分池（20 日均成交額）", "港元"),
@@ -1021,10 +1025,12 @@ def num(v):
 
 
 def dig(d, key):
-    """支援 "vol_ratio.A" 這種巢狀鍵；取不到回傳 {}"""
+    """支援 "vol_ratio.A" 這種巢狀鍵；取不到回傳 None（0 是合法值，不可用 or 判斷）"""
     for part in key.split("."):
-        d = (d or {}).get(part, {})
-    return d or {}
+        if not isinstance(d, dict) or part not in d:
+            return None
+        d = d[part]
+    return d
 
 
 def save_params(changes, rule_edits, other_edits, cd_edits, action_edits, who, why):
@@ -1046,7 +1052,11 @@ def save_params(changes, rule_edits, other_edits, cd_edits, action_edits, who, w
                 node = node[part]
             node[lv] = num(v)
         for key, v in other_edits:
-            doc[key] = num(v)
+            parts = key.split(".")          # 支援 "vol_3m_gate.hist_min" 這種巢狀鍵
+            node = doc
+            for part in parts[:-1]:
+                node = node[part]
+            node[parts[-1]] = num(v)
         for rule, v in cd_edits:
             doc["cooldown_min"][rule] = num(v)
         buf2 = _io.StringIO()
@@ -1080,7 +1090,7 @@ with tab_param:
     st.subheader("異常交易監控閾值")
     rows = []
     for key, (name, unit, scope, src) in RULE_INFO.items():
-        v = dig(cfg, key)
+        v = dig(cfg, key) or {}
         rows.append({"鍵": key, "類別": src, "監控項目": name, "黃": v.get("黃"), "橙": v.get("橙"), "紅": v.get("紅"),
                      "單位": unit, "成交額下限": v.get("min_turnover"), "適用範圍": scope,
                      "冷卻（分）": cd.get(RULE_NAME[key])})
@@ -1122,8 +1132,10 @@ with tab_param:
                            column_config={"分數": st.column_config.NumberColumn(min_value=0, max_value=100)})
 
     st.subheader("其他參數")
-    o_df = pd.DataFrame([{"鍵": k, "參數": d, "設定值": float(cfg.get(k, 0)), "單位": unit}
-                         for k, (d, unit) in OTHER_INFO.items() if k in cfg])
+    o_df = pd.DataFrame([{"鍵": k, "參數": d, "設定值": float(dig(cfg, k) if "." in k else cfg.get(k, 0)),
+                          "單位": unit}
+                         for k, (d, unit) in OTHER_INFO.items()
+                         if (dig(cfg, k) is not None if "." in k else k in cfg)])
     o_new = st.data_editor(o_df, hide_index=True, use_container_width=True, key="ed_other",
                            disabled=["鍵", "參數", "單位"], column_config={"鍵": None})
 

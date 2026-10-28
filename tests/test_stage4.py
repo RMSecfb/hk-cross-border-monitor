@@ -54,16 +54,13 @@ uni = pd.DataFrame({"code": codes, "name": "X", "vcm_pct": [None] * 2})
 stats = pd.DataFrame({"code": codes, "prev_close": 100.0, "ma": 100.0, "avg_vol": 1e5,
                       "avg_turnover": 5e8, "halted": False})
 
+# 3 分鐘量暴增的判定邏輯於 2026-10-28 改版（逐分鐘檢驗 + 四道閘門），
+# 完整驗證移到 test_stage6_vol3m.py；這裡只確認它不會誤報 10:05 的常態放量。
 a = run_rules(bars, stats, uni, cfg, baseline=bl)
 v3 = a[a["rule"] == "3分鐘量暴增"].set_index("code")
 checks += [
     ("同時點分母：10:05 的常態放量不誤報", 61 not in v3.index),
-    ("同時點分母：10:02 的異常放量有報", 62 in v3.index),
-    ("3 分鐘量暴增倍數 = 12,000 / 3,000 = 4 倍",
-     62 in v3.index and abs(v3.loc[62, "value"] - 4.0) < 0.05),
-    ("3 分鐘量暴增每檔只一筆（t*）", (a["rule"] == "3分鐘量暴增").sum() <= len(codes)),
-    ("說明欄指出用的是同時點分母",
-     62 in v3.index and "過去 5 日同時點" in v3.loc[62, "detail"]),
+    ("3 分鐘量暴增每檔最多一筆", (a["rule"] == "3分鐘量暴增").sum() <= len(codes)),
     ("說明欄不再出現「歷史不足」的退回字樣", not a["detail"].str.contains("歷史不足").any()),
 ]
 

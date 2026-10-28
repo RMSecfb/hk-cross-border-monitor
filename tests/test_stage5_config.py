@@ -29,6 +29,10 @@ checks = [
     ("參數頁可編輯到所有規則的冷卻時間", not emitted - page),
     ("rules.yaml 不再有已淘汰的鍵",
      not ({"vcm_early_ratio", "cas_dev"} & set(cfg))),
+    ("3 分鐘量暴增的四道閘門齊備",
+     all(k in cfg["vol_3m_gate"] for k in ("hist_min", "today_min", "permin_min", "traded_min"))),
+    ("閘門的 today_min 與分級黃燈同值（語意一致）",
+     cfg["vol_3m_gate"]["today_min"] == cfg["vol_3m"]["A"]["黃"]),
     ("雙軌參數結構完整",
      all("A" in cfg[k] and "B" in cfg[k] and "min_turnover" in cfg[k]["A"]
          for k in ("vol_ratio", "vol_3m"))),
@@ -36,7 +40,7 @@ checks = [
      all(k in cfg for k in ("pool_split_turnover", "min_hist_days", "min_hist_days_cum",
                             "cas_dev_main", "cas_dev_thin", "cas_pool_split_turnover",
                             "cas_max_stale_min", "cas_max_dev", "vcm_ratio",
-                            "max_prev_gap_min", "max_ref_gap_5m_min", "open_window_min"))),
+                            "max_prev_gap_min", "max_ref_gap_5m_min", "open_window_min", "vol_3m_gate"))),
     ("門檻排序 黃 ≤ 橙 ≤ 紅",
      all(v["黃"] <= v["橙"] <= v["紅"]
          for k in ("day_change", "chg_1m", "chg_5m", "ma_dev", "open_gap", "turnover",
