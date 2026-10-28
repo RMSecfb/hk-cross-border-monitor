@@ -187,6 +187,34 @@ eod = read_csv(DATA / "report" / f"eod_alerts_{ymd}.csv")
 alerts_all = alerts if not alerts.empty else eod
 
 
+LEVEL_ORDER = {"紅": 0, "橙": 1, "黃": 2}
+
+
+def live_risk_score(alerts_df, cfg):
+    """由盤中累計警報即時算風險分數，算法與盤後 src/report.py 的 risk_score() 一致：
+    每檔每規則取當日最高等級，分數加總後上限 100。
+
+    盤後的 score_YYYYMMDD.csv 要 16:42 才產生，盤中讀不到；若不即時算，
+    「今日高風險排行」在整個交易時段都無分數可排。
+    """
+    if alerts_df is None or alerts_df.empty or "level" not in alerts_df.columns:
+        return pd.DataFrame()
+    w = cfg.get("score_weights", {"紅": 40, "橙": 25, "黃": 10})
+    a = alerts_df.copy()
+    a["_o"] = a["level"].map(LEVEL_ORDER)
+    top = a.sort_values("_o").drop_duplicates(["code", "rule"])      # 每檔每規則取最高等級
+    g = top.groupby("code")
+    sc = pd.DataFrame({
+        "name": g["name"].first() if "name" in top.columns else "",
+        "score": g["level"].apply(lambda x: sum(w.get(v, 0) for v in x)).clip(upper=100),
+        "紅": g["level"].apply(lambda x: (x == "紅").sum()),
+        "橙": g["level"].apply(lambda x: (x == "橙").sum()),
+        "黃": g["level"].apply(lambda x: (x == "黃").sum()),
+        "rules": g["rule"].apply(lambda x: "、".join(x)),
+    }).reset_index()
+    return sc.sort_values("score", ascending=False)
+
+
 def data_until(alerts_df, snap_df, day_str):
     """行情資料截止時間（HH:MM）。
     快照檔名帶的是程式執行時點，非行情時間，兩者可能差很多（例如補跑），
@@ -520,7 +548,6 @@ def summary_panel(alerts_df, snap_df, is_eod=False, rep_day_str="", day_key="", 
 
 
 # ---------- 報告匯出（盤中、盤後共用）----------
-LEVEL_ORDER = {"紅": 0, "橙": 1, "黃": 2}
 PDF_LEVELS = ["紅", "橙"]     # 盤中 PDF 只列紅、橙；黃燈量大，留在 Excel
 
 
@@ -674,14 +701,17 @@ with tab_rank:
     if snap.empty:
         st.info("尚無盤中快照。")
     else:
-        st.caption("依盤中快照風險分數排行，顯示當日最需關注的標的（最近一次排程更新）。")
-        # 讀今日盤中 score（若盤後已完成則用盤後）
+        # 盤後 score 檔 16:42 才產生；盤中改由累計警報即時計算，算法與盤後相同
         score_f_intraday = DATA / "report" / f"score_{ymd}.csv"
         if score_f_intraday.exists():
-            score_today = pd.read_csv(score_f_intraday)
+            score_today, src_label = pd.read_csv(score_f_intraday), "盤後重算結果"
         else:
-            # 即時估算：從快照 alerts 計算
-            score_today = pd.DataFrame()
+            score_today, src_label = live_risk_score(alerts_all, cfg_rules), "盤中累計警報即時計算"
+        st.caption(f"依風險分數排行（{src_label}）：每檔每項監控取當日最高等級，"
+                   f"紅 {cfg_rules.get('score_weights', {}).get('紅', 40)}／"
+                   f"橙 {cfg_rules.get('score_weights', {}).get('橙', 25)}／"
+                   f"黃 {cfg_rules.get('score_weights', {}).get('黃', 10)} 分加總，上限 100。"
+                   "分數相同者不分先後，請一併檢視。")
 
         min_score = st.number_input("風險分數 ≥", value=30, step=5, min_value=0, max_value=100)
         top_n = st.number_input("顯示前 N 檔", value=30, step=5, min_value=5, max_value=100)
