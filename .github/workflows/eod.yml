@@ -57,6 +57,8 @@ jobs:
       - if: steps.gate.outputs.skip != 'true'
         run: pip install -r requirements-pipeline.txt
       - if: steps.gate.outputs.skip != 'true'
+        env:
+          GITHUB_TOKEN: ${{ github.token }}   # bars_store 需要它才讀得到 Release 上的 1 分 K
         run: python src/eod.py ${{ inputs.init && '--init' || '' }}
 
       # 1 分 K 歷史存為 Release 附件：不佔 git 容量、不計費，刪除後空間即回收。

@@ -91,7 +91,8 @@ def fetch(day):
     if not rel:
         return None
     for a in rel.get("assets", []):
-        if a["name"].endswith(".parquet"):
+        # 同一個 Release 可能同時有 baseline_*.parquet，只能取 bars_ 開頭的
+        if a["name"].startswith("bars_") and a["name"].endswith(".parquet"):
             r = requests.get(a["url"], headers=_headers() | {"Accept": "application/octet-stream"}, timeout=180)
             if r.status_code == 200:
                 return pd.read_parquet(io.BytesIO(r.content))

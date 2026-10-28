@@ -62,6 +62,8 @@ jobs:
       - if: steps.gate.outputs.skip != 'true'
         run: pip install -r requirements-pipeline.txt
       - if: steps.gate.outputs.skip != 'true'
+        env:
+          GITHUB_TOKEN: ${{ github.token }}   # bars_store 需要它才讀得到 Release 上的基準
         run: python src/intraday.py ${{ inputs.force && '--force' || '' }}
       - if: steps.gate.outputs.skip != 'true'
         name: 存回 repo

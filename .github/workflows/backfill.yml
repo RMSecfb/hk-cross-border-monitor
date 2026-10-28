@@ -40,7 +40,9 @@ jobs:
           cache: pip
           cache-dependency-path: requirements-pipeline.txt
       - run: pip install -r requirements-pipeline.txt
-      - run: |
+      - env:
+          GITHUB_TOKEN: ${{ github.token }}   # bars_store 需要它才讀得到 Release 上既有的 1 分 K
+        run: |
           python src/backfill.py ${{ inputs.start }} ${{ inputs.end }} \
             ${{ inputs.rebuild_profile && '--rebuild-profile' || '' }}
 
@@ -76,6 +78,7 @@ jobs:
         name: 建立並發布同時點基準
         env:
           GH_TOKEN: ${{ github.token }}
+          GITHUB_TOKEN: ${{ github.token }}
         run: |
           set -e
           f=$(python src/publish_baseline.py | tail -1)
