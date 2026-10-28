@@ -36,7 +36,7 @@ checks = [
      all(k in cfg for k in ("pool_split_turnover", "min_hist_days", "min_hist_days_cum",
                             "cas_dev_main", "cas_dev_thin", "cas_pool_split_turnover",
                             "cas_max_stale_min", "cas_max_dev", "vcm_ratio",
-                            "max_prev_gap_min", "open_window_min"))),
+                            "max_prev_gap_min", "max_ref_gap_5m_min", "open_window_min"))),
     ("門檻排序 黃 ≤ 橙 ≤ 紅",
      all(v["黃"] <= v["橙"] <= v["紅"]
          for k in ("day_change", "chg_1m", "chg_5m", "ma_dev", "open_gap", "turnover",

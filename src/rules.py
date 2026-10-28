@@ -146,7 +146,7 @@ def run_rules(bars, stats, universe, cfg, daily_close=None, ex_div_codes=None,
     # ---- 1. 1 分鐘急漲急跌（對上一筆成交分鐘）----
     # 「上一根」未必是一分鐘前：冷門股可能隔數十分鐘才有下一筆成交，該漲跌幅實際涵蓋很長一段時間。
     prev_t = g["time"].shift(1)
-    gap1_ok = (b["time"] - prev_t).dt.total_seconds().le(cfg.get("max_prev_gap_min", 3) * 60)
+    gap1_ok = (b["time"] - prev_t).dt.total_seconds().le(cfg["max_prev_gap_min"] * 60)
     chg1 = (b["close"] / g["close"].shift(1) - 1) * 100
     out.append(emit(b, tradable & gap1_ok.fillna(False), "1分鐘急漲急跌",
                     grade(chg1, cfg["chg_1m"]), chg1, "vs 上一分鐘"))
@@ -164,7 +164,7 @@ def run_rules(bars, stats, universe, cfg, daily_close=None, ex_div_codes=None,
     same_session = ((m < AM[1]) | (rt.values >= PM[0])) & probe["rt"].notna().values  # 午市不沿用早市參考價
     # 參考價距今過久者不計算（同 1 分鐘規則的理由）：找不到 5 分鐘前的價時會回退到更早的成交
     gap5_ok = (b["time"] - pd.Series(probe["rt"].values)).dt.total_seconds().le(
-        (5 + cfg.get("max_prev_gap_min", 3)) * 60).fillna(False).values
+        cfg["max_ref_gap_5m_min"] * 60).fillna(False).values
     chg5 = (b["close"] / b["ref_px"] - 1) * 100
     out.append(emit(b, tradable & same_session & gap5_ok, "5分鐘急漲急跌",
                     grade(chg5, cfg["chg_5m"]), chg5, "vs 5 分鐘前"))
