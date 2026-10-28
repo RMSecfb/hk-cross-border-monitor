@@ -132,11 +132,19 @@ def main(force=False):
         new.to_csv(path("alerts", f"alerts_new_{stamp}.csv"), index=False, encoding="utf-8-sig")
     lv = new["level"].value_counts().to_dict()
 
-    # 資料品質：1 分 K 加總 ÷ 前一交易日日線量（只記錄，不影響判定）
+    # 資料品質：1 分 K 加總 ÷ 同期間的正常成交量（只記錄，不影響判定）。
+    # 分母必須按已交易時間等比縮放——盤中只過了部分交易時段，拿整天均量比會恆小，
+    # 開盤半小時算出 0.06 是正常的，卻會被誤讀成「資料不可信」。
     try:
-        q = bars_store.quality(bars, stats.set_index("code")["avg_vol"]) if "avg_vol" in stats else {}
+        from rules import minutes_elapsed
+        el = float(minutes_elapsed(pd.Series([bars["time"].max()])).iloc[0])
+        scale = min(max(el / 330, 0.01), 1.0)
+        q = bars_store.quality(bars, stats.set_index("code")["avg_vol"] * scale) \
+            if "avg_vol" in stats else {}
         if q:
-            q["note"] = "1分K加總 ÷ 20日均量；偏離 1 很遠代表 Yahoo 分鐘資料可信度低"
+            q["elapsed_min"] = round(el)
+            q["note"] = (f"1分K加總 ÷（20日均量 × 已交易 {el:.0f}/330 分）；"
+                         "偏離 1 很遠代表 Yahoo 分鐘資料可信度低")
     except Exception:
         q = {}
 

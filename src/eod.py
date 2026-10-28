@@ -156,6 +156,16 @@ def eod_for_day(day, raw, daily, uni, cfg, update_prof=True, build_base=True, ba
     if "halted" not in prev_stats:          # 舊格式基準檔沒有停牌欄，重算一份
         log.info(f"stats_{prev_day:%Y%m%d}.csv 為舊格式（無 halted），重新產生")
         prev_stats = make_stats(cfg, prev_day)
+    # prev_close／ma／avg_vol 必須是「截至前一交易日」的值，但股本是靜態屬性，不該沿用快照。
+    # 否則 shares.csv 更新後要再等一個交易日才生效（換手率的分母會慢一天）。
+    sh_f = CONFIG / "shares.csv"
+    if sh_f.exists():
+        sh = pd.read_csv(sh_f)
+        if "source" not in sh:
+            sh["source"] = "implied"        # 舊檔沒有來源欄，一律視為 A+H 合計
+        prev_stats = (prev_stats.drop(columns=[c for c in ("shares", "shares_src") if c in prev_stats])
+                      .merge(sh[["code", "shares", "source"]].rename(columns={"source": "shares_src"}),
+                             on="code", how="left"))
     if isinstance(baseline, str) and baseline == "auto":
         try:
             base = bars_store.fetch_baseline(before=day)  # 用不含當日的基準，與盤中同條件
