@@ -74,11 +74,11 @@ checks.append(("盤中無日線資料時不計算", (a_intra["rule"] == "冬眠�
 
 # 復牌股須帶標記：停牌期間成交額為 0 會壓低 20 日均額，倍數同樣失真
 stats_h = stats.copy()
-stats_h.loc[stats_h["code"] == 11, "halted"] = True
+stats_h.loc[stats_h["code"] == 11, "halted_20"] = True
 a_h = run_rules(bars, stats_h, uni, cfg, daily_close=close, daily_volume=vol)
 r11 = a_h[(a_h["rule"] == "冬眠股異動") & (a_h["code"] == 11)]
-checks.append(("復牌股帶「復牌首日」標記",
-               len(r11) == 1 and "復牌首日" in r11["note"].iloc[0]))
+checks.append(("復牌股帶標記（冬眠股異動分母為 20 日，故用 long 窗格）",
+               len(r11) == 1 and "復牌未滿 20 個交易日" in r11["note"].iloc[0]))
 
 # 門檻設定本身的健全性
 checks += [

@@ -53,12 +53,20 @@ def make_stats(cfg, asof):
     # 復牌當日與停牌期間的價格比較會產生巨大假跳空（實測 −57%～+88%），故價格類指標需排除。
     halted = ((last["volume"] == 0) & (last["open"] == last["close"])
               & (last["high"] == last["low"]) & (last["open"] == last["high"]))
+    # 量能類的復牌標記看的是「平均窗格內還有沒有 0 成交量的日子」，不是「昨天是否停牌」。
+    # 故另算每檔近 N 個交易日內是否曾停牌，N 取各指標自己的平均天數（見 rules.HALT_TAG_RULES）。
+    is_halt = ((d["volume"] == 0) & (d["open"] == d["close"])
+               & (d["high"] == d["low"]) & (d["open"] == d["high"]))
+    dh = d.assign(_h=is_halt)
+    htd = cfg.get("halt_tag_days", {"short": 5, "long": 20})
     stats = pd.DataFrame({
         "prev_close": g["close"].last(),
         "ma": g["close"].apply(lambda s: s.tail(n_ma).mean() if len(s) >= n_ma else None),
         "avg_vol": g["volume"].apply(lambda s: s.tail(n_vol).mean()),
         "avg_turnover": (d["close"] * d["volume"]).groupby(d["code"]).apply(lambda s: s.tail(n_vol).mean()),
         "halted": halted.astype(bool),
+        "halted_5": dh.groupby("code").tail(htd["short"]).groupby("code")["_h"].any(),
+        "halted_20": dh.groupby("code").tail(htd["long"]).groupby("code")["_h"].any(),
         # ex_div 指「asof 當日」是否除息；盤後由 eod_for_day 直接從當日日線取得，
         # 這裡保留供查核與盤中回溯使用（盤中無法預知當日除息，故盤中不做除息標記）
         "ex_div": (last["dividends"] > 0) if "dividends" in last else False,
@@ -153,8 +161,8 @@ def eod_for_day(day, raw, daily, uni, cfg, update_prof=True, build_base=True, ba
     prev_day = load_daily(day - pd.Timedelta(days=1), 1)["date"].max()
     prev_f = path("stats", f"stats_{prev_day:%Y%m%d}.csv")
     prev_stats = pd.read_csv(prev_f) if prev_f.exists() else make_stats(cfg, prev_day)
-    if "halted" not in prev_stats:          # 舊格式基準檔沒有停牌欄，重算一份
-        log.info(f"stats_{prev_day:%Y%m%d}.csv 為舊格式（無 halted），重新產生")
+    if not {"halted", "halted_5", "halted_20"} <= set(prev_stats):   # 舊格式缺停牌欄，重算一份
+        log.info(f"stats_{prev_day:%Y%m%d}.csv 為舊格式（缺停牌欄位），重新產生")
         prev_stats = make_stats(cfg, prev_day)
     # prev_close／ma／avg_vol 必須是「截至前一交易日」的值，但股本是靜態屬性，不該沿用快照。
     # 否則 shares.csv 更新後要再等一個交易日才生效（換手率的分母會慢一天）。

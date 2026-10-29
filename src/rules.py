@@ -18,6 +18,15 @@ VCM_AM, VCM_PM = (pd.Timedelta("9h45m"), pd.Timedelta("12h")), (pd.Timedelta("13
 # 規則分組：供「只加註不排除」的標記使用
 PRICE_RULES = ["即時漲跌幅", "開盤價異常", "1分鐘急漲急跌", "5分鐘急漲急跌", "偏離均線"]
 VOLUME_RULES = ["成交量暴增", "3分鐘量暴增", "連續放量", "換手率異常", "冬眠股異動"]
+# 復牌標記的適用範圍與回看窗格。停牌期間 Yahoo 的成交量為 0，會把「歷史均量」壓低，
+# 倍數因而失真；失真延續到那些 0 成交量的日子滾出平均窗格為止，所以回看窗格應等於
+# 各指標自己的平均天數，而不是一律只看「復牌當天」（2026-10-29 更正）。
+HALT_TAG_RULES = {
+    "short": ["3分鐘量暴增", "連續放量"],      # 分母取近 5 個交易日
+    "long": ["成交量暴增", "冬眠股異動"],      # 分母取近 20 個交易日
+}
+# 換手率異常不在內：分子是日線成交量、分母是股本，完全不經過歷史均值，停牌不會造成失真。
+# 先前一併標記「倍數失真」是錯的——該指標根本沒有倍數。
 # 分鐘級規則：同一批次內每檔只留最嚴重的一筆（原本每分鐘都判斷，一波拉抬會報出數十筆）
 BATCH_MAX_RULES = ["3分鐘量暴增", "連續放量"]
 LEVEL_RANK = {lv: i for i, lv in enumerate(LEVELS)}
@@ -142,7 +151,7 @@ def run_rules(bars, stats, universe, cfg, daily_close=None, ex_div_codes=None,
     # 全市場每日有 22–29% 的股票處於停牌狀態；實測 10/27 開盤價異常 226 檔中有 71 檔（31%）屬此類。
     not_halted = ~b["halted"].fillna(False).astype(bool) if "halted" in b else pd.Series(True, index=b.index)
     tradable = liquid & not_halted      # 價格類用：停牌排除
-    # 量能類（成交量暴增 / 3 分鐘量暴增 / 連續放量 / 換手率）不排除復牌股，改在 note 標記「復牌首日」
+    # 量能類不排除復牌股，改在 note 標記（見檔案開頭 HALT_TAG_RULES）
 
     # ---- 1. 1 分鐘急漲急跌（對上一筆成交分鐘）----
     # 「上一根」未必是一分鐘前：冷門股可能隔數十分鐘才有下一筆成交，該漲跌幅實際涵蓋很長一段時間。
@@ -378,10 +387,20 @@ def run_rules(bars, stats, universe, cfg, daily_close=None, ex_div_codes=None,
     if ex_div_codes:
         tags.append(("除息日",
                      alerts["code"].isin(set(ex_div_codes)) & alerts["rule"].isin(PRICE_RULES)))
-    # 復牌首日：停牌期間 Yahoo 的成交量為 0，會把 20 日均量壓低，復牌當天的正常量除以被壓低的
+    # 復牌：停牌期間 Yahoo 的成交量為 0，會把歷史均量壓低，復牌後的正常量除以被壓低的
     # 基準，倍數自然失真（10/26 實測中位數 8 倍、最高 347 倍）。但復牌放量本身值得注意，
-    # 所以量能類只標記不排除；價格類的假跳空無判讀價值，已在各規則以 halted 排除。
-    if "halted" in stats:
+    # 所以量能類只標記不排除；價格類的假跳空無判讀價值，已在各規則以 halted 排除
+    # （價格類維持只看「復牌當天」是對的：隔天起 prev_close 已是真實成交價，不再有假跳空）。
+    halt_cols = [("short", "halted_5", 5), ("long", "halted_20", 20)]
+    if any(c in stats for _, c, _ in halt_cols):
+        for span, col, n in halt_cols:
+            if col not in stats:
+                continue
+            codes = set(stats.loc[stats[col].fillna(False).astype(bool), "code"])
+            if codes:
+                tags.append((f"復牌未滿 {n} 個交易日（倍數失真）",
+                             alerts["code"].isin(codes) & alerts["rule"].isin(HALT_TAG_RULES[span])))
+    elif "halted" in stats:      # 舊格式基準檔沒有新欄位，退回原本的「復牌首日」
         halted_codes = set(stats.loc[stats["halted"].fillna(False).astype(bool), "code"])
         if halted_codes:
             tags.append(("復牌首日（倍數失真）",
