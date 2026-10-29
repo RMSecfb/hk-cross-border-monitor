@@ -69,15 +69,19 @@ def risk_score(alerts, cfg):
            .drop_duplicates(["code", "rule"]))                       # 每檔每規則取最高等級
     top["pts"] = top["level"].map(w)
     g = top.groupby("code")
+    # score 維持 0–100（門檻與顏色都依它），但 100 分上限會讓最嚴重的一群並列——
+    # 實測日均 20 檔同為 100 分，等於前 20 名沒有先後。另存不截斷的 score_raw 專供排序。
+    raw = g["pts"].sum()
     sc = pd.DataFrame({
         "name": g["name"].first(),
-        "score": g["pts"].sum().clip(upper=100),
+        "score": raw.clip(upper=100),
+        "score_raw": raw,
         "紅": g["level"].apply(lambda s: (s == "紅").sum()),
         "橙": g["level"].apply(lambda s: (s == "橙").sum()),
         "黃": g["level"].apply(lambda s: (s == "黃").sum()),
         "rules": g["rule"].apply(lambda s: "、".join(s)),
     }).reset_index()
-    return sc.sort_values("score", ascending=False)
+    return sc.sort_values("score_raw", ascending=False)
 
 
 def score_history(before, n=10):
@@ -122,7 +126,8 @@ def build_report(alerts, uni, cfg, day, score):
     cnt = a.groupby(["code", "rule"]).size().rename("觸發次數")
     top = a.sort_values(["o", "t"]).drop_duplicates(["code", "rule"]).join(cnt, on=["code", "rule"])
     # 排序：風險分數降冪 → 同一檔排在一起 → 等級（紅/橙/黃）→ 監控類型
-    code_score = score.set_index("code")["score"] if not score.empty else pd.Series(dtype=float)
+    rank_col = "score_raw" if "score_raw" in score else "score"
+    code_score = score.set_index("code")[rank_col] if not score.empty else pd.Series(dtype=float)
     top["_score"] = top["code"].map(code_score).fillna(0)
     top = top.sort_values(["_score", "code", "o", "rule"],
                           ascending=[False, True, True, True]).reset_index(drop=True)

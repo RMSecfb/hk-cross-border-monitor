@@ -204,15 +204,17 @@ def live_risk_score(alerts_df, cfg):
     a["_o"] = a["level"].map(LEVEL_ORDER)
     top = a.sort_values("_o").drop_duplicates(["code", "rule"])      # 每檔每規則取最高等級
     g = top.groupby("code")
+    raw = g["level"].apply(lambda x: sum(w.get(v, 0) for v in x))
     sc = pd.DataFrame({
         "name": g["name"].first() if "name" in top.columns else "",
-        "score": g["level"].apply(lambda x: sum(w.get(v, 0) for v in x)).clip(upper=100),
+        "score": raw.clip(upper=100),
+        "score_raw": raw,
         "紅": g["level"].apply(lambda x: (x == "紅").sum()),
         "橙": g["level"].apply(lambda x: (x == "橙").sum()),
         "黃": g["level"].apply(lambda x: (x == "黃").sum()),
         "rules": g["rule"].apply(lambda x: "、".join(x)),
     }).reset_index()
-    return sc.sort_values("score", ascending=False)
+    return sc.sort_values("score_raw", ascending=False)
 
 
 def data_until(alerts_df, snap_df, day_str):
@@ -753,8 +755,9 @@ with tab_rank:
         top_n = st.number_input("顯示前 N 檔", value=30, step=5, min_value=5, max_value=100)
 
         if not score_today.empty:
+            rank_col = "score_raw" if "score_raw" in score_today else "score"
             hi_risk = (score_today[score_today["score"] >= min_score]
-                       .sort_values("score", ascending=False)
+                       .sort_values(rank_col, ascending=False)
                        .head(int(top_n)))
             # 補入即時價格
             if not snap.empty and "code" in snap.columns:
