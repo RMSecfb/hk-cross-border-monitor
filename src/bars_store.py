@@ -24,7 +24,12 @@ log = get_logger("bars")
 API = "https://api.github.com"
 TAG_PREFIX = "bars-"
 KEEP_DAYS = 30                 # Release 保留天數（規則只需 20 天，留 10 天緩衝）
-MIN_AVG_TURNOVER = 500_000     # 收錄門檻：20 日均成交額 ≥ 50 萬港元
+# 收錄門檻：0 = 全名單收錄。原為 500_000（20 日均成交額 ≥ 50 萬港元），2026-10-29 取消。
+#   舊設定把 1,649 檔（占名單 58.8%）排除在封存外，這些股票永遠拿不到同時點分母，
+#   等於 B 軌（門檻是「當下成交額 ≥ 500 萬」，本意就是抓冬眠股爆量）對它們是空的。
+#   取消的代價很小：封存只存 volume > 0 的列，冬眠股每天僅數分鐘有成交，估計增幅約 4%；
+#   B 軌那道 500 萬的閘門實測 20 個交易日只有 6 檔次會過，日均新增約 0.3 筆警報。
+MIN_AVG_TURNOVER = 0
 
 
 def _repo():
@@ -53,7 +58,7 @@ def to_frame(bars, stats=None):
     b["code"] = b["code"].astype("int32")
     b["volume"] = pd.to_numeric(b["volume"], errors="coerce").fillna(0).astype("int64")
     b = b[b["volume"] > 0]
-    if stats is not None and "avg_turnover" in stats:
+    if MIN_AVG_TURNOVER > 0 and stats is not None and "avg_turnover" in stats:
         keep = set(stats.loc[stats["avg_turnover"] >= MIN_AVG_TURNOVER, "code"].astype(int))
         if keep:
             b = b[b["code"].isin(keep)]

@@ -19,7 +19,7 @@ page = set(re.findall(r'"[\w.]+": "([^"]+)"', app.split("RULE_NAME = {")[1].spli
 page |= set(re.findall(r'"([^"]+)"', app.split("EXTRA_COOLDOWN = [")[1].split("]")[0]))
 
 checks = [
-    ("規則共 11 條（VCM 兩條已合併為一條）", len(emitted) == 11),
+    ("規則共 12 條（VCM 兩條已合併為一條；2026-10-29 加入冬眠股異動）", len(emitted) == 12),
     ("actions.yaml 涵蓋所有規則", not emitted - act_rules),
     ("actions.yaml 無已移除的規則", not act_rules - emitted),
     ("cooldown_min 涵蓋所有規則", not emitted - cd),

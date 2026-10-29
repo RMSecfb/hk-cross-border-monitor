@@ -988,6 +988,7 @@ RULE_INFO = {  # 參數鍵: (監控項目, 單位, 適用範圍, Excel 出處)
     "vol_3m.B": ("3 分鐘量暴增（冬眠股 B 軌）", "倍", "vs 今日均量；20 日均成交額 < 1,000 萬", "成交量異常"),
     "vol_streak": ("連續放量", "倍/分鐘", "活躍股（單軌）", "成交量異常"),
     "turnover": ("換手率異常", "%", "全市場（需股本資料，僅盤後）", "成交量異常"),
+    "dormant_move": ("冬眠股異動", "倍", "20 日均成交額 < 50 萬（盤後；不需 1 分 K 歷史）", "成交量異常"),
     "vcm_ratio": ("VCM 預警", "佔門檻比例", "VCM 名單；09:45–12:00、13:15–15:40", "VCM與市場機制"),
 }
 OTHER_INFO = {
@@ -1006,6 +1007,9 @@ OTHER_INFO = {
     "min_hist_days": ("同時點分母：3分鐘量暴增／連續放量所需天數", "交易日"),
     "min_hist_days_cum": ("同時點分母：成交量暴增所需天數", "交易日"),
     "pool_split_turnover": ("量能雙軌 A／B 分池（20 日均成交額）", "港元"),
+    "dormant_move.max_avg_turnover": ("冬眠股異動：只看 20 日均成交額低於此者", "港元"),
+    "dormant_move.min_turnover": ("冬眠股異動：當日成交額下限", "港元"),
+    "dormant_move.base_floor": ("冬眠股異動：20 日均額的下限（避免倍數爆掉）", "港元"),
     "cas_pool_split_turnover": ("收市競價：一般股／冷門股分流（20 日均成交額）", "港元"),
     "cas_max_stale_min": ("收市競價：最後成交距 16:00 超過此值降一級", "分鐘"),
     "cas_max_dev": ("收市競價：偏離超過此值視為資料異常", "%"),
@@ -1018,7 +1022,7 @@ RULE_NAME = {"day_change": "即時漲跌幅", "chg_1m": "1分鐘急漲急跌", "
              "open_gap": "開盤價異常", "cas_dev_main": "收市競價異常", "cas_dev_thin": "收市競價異常",
              "vol_ratio.A": "成交量暴增", "vol_ratio.B": "成交量暴增",
              "vol_3m.A": "3分鐘量暴增", "vol_3m.B": "3分鐘量暴增", "vol_streak": "連續放量",
-             "turnover": "換手率異常", "vcm_ratio": "VCM預警"}
+             "turnover": "換手率異常", "vcm_ratio": "VCM預警", "dormant_move": "冬眠股異動"}
 EXTRA_COOLDOWN = ["VCM預警"]
 
 

@@ -17,7 +17,7 @@ VCM_AM, VCM_PM = (pd.Timedelta("9h45m"), pd.Timedelta("12h")), (pd.Timedelta("13
 
 # 規則分組：供「只加註不排除」的標記使用
 PRICE_RULES = ["即時漲跌幅", "開盤價異常", "1分鐘急漲急跌", "5分鐘急漲急跌", "偏離均線"]
-VOLUME_RULES = ["成交量暴增", "3分鐘量暴增", "連續放量", "換手率異常"]
+VOLUME_RULES = ["成交量暴增", "3分鐘量暴增", "連續放量", "換手率異常", "冬眠股異動"]
 # 分鐘級規則：同一批次內每檔只留最嚴重的一筆（原本每分鐘都判斷，一波拉抬會報出數十筆）
 BATCH_MAX_RULES = ["3分鐘量暴增", "連續放量"]
 LEVEL_RANK = {lv: i for i, lv in enumerate(LEVELS)}
@@ -282,6 +282,29 @@ def run_rules(bars, stats, universe, cfg, daily_close=None, ex_div_codes=None,
         day_vol = last["code"].map(daily_volume)
         tr = day_vol / last["shares"] * 100
         out.append(emit(last, tr.notna(), "換手率異常", grade(tr, cfg["turnover"]), tr, "日線成交量 / 在港股數"))
+
+    # 冬眠股異動：只在盤後計算，且刻意不經過 1 分 K——連 last（由 bars 衍生）都不用，
+    # 因為最冷門的股票當天可能一根 1 分 K 都沒有，用 bars 當底會把它們直接漏掉。
+    # 封存收錄門檻取消後（2026-10-29），冬眠股仍要累積 5／20 個交易日才拿得到同時點分母，
+    # 「剛從冬眠轉活躍」的那 1～4 週正是最可疑的時間窗，量能三指標必定靜音；日線對全名單
+    # 永遠是滿的，用它補這段空窗。範圍限定在冬眠線以下，與成交量暴增不重疊。
+    dm = cfg.get("dormant_move")
+    if dm and daily_volume is not None and daily_close is not None and "avg_turnover" in stats:
+        dd = universe[["code"]].drop_duplicates().merge(
+            stats[["code", "avg_turnover"]].drop_duplicates("code"), on="code", how="left")
+        dd["time"] = b["time"].max()
+        cur_to = dd["code"].map(daily_volume) * dd["code"].map(daily_close)
+        base_to_d = dd["avg_turnover"]
+        # 近乎零成交者的均額會把倍數放大到無意義（實測 2362 的 20 日均額為 0），故設下限。
+        # 下限只影響倍數大小與分級，不影響是否入選；detail 會標明已套用。
+        floored = base_to_d.fillna(0) < dm["base_floor"]
+        ratio_d = cur_to / base_to_d.clip(lower=dm["base_floor"])
+        ok_dm = ((base_to_d < dm["max_avg_turnover"]) & (cur_to >= dm["min_turnover"])
+                 & ratio_d.notna()).fillna(False)
+        det_dm = ("當日成交額 " + (cur_to / 1e4).round(1).astype(str) + " 萬 / 20 日均額 "
+                  + (base_to_d / 1e4).round(2).astype(str) + " 萬"
+                  + np.where(floored, "（均額低於下限，以 1 萬計）", "")).values
+        out.append(emit(dd, ok_dm, "冬眠股異動", grade(ratio_d, dm), ratio_d, det_dm))
 
     # 開盤價異常：first 是「資料中的第一根 K 線」，對下午才首次成交的冷門股並非開盤價。
     # 實測 10/27 的 230 筆中，真正在 09:30 開盤者僅 13%，下午才首次成交者達 42 筆
