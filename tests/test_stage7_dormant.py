@@ -72,13 +72,15 @@ checks += [
 a_intra = run_rules(bars, stats, uni, cfg)
 checks.append(("盤中無日線資料時不計算", (a_intra["rule"] == "冬眠股異動").sum() == 0))
 
-# 復牌股須帶標記：停牌期間成交額為 0 會壓低 20 日均額，倍數同樣失真
+# 本指標刻意不帶復牌標記：冬眠股的零成交日與停牌的資料特徵完全相同（volume=0、OHLC 全同），
+# 無從區分；且對這條指標而言，低均額不是失真，正是它要衡量的訊號本身。
 stats_h = stats.copy()
-stats_h.loc[stats_h["code"] == 11, "halted_20"] = True
+stats_h["halted_5"] = True
+stats_h["halted_20"] = True
 a_h = run_rules(bars, stats_h, uni, cfg, daily_close=close, daily_volume=vol)
-r11 = a_h[(a_h["rule"] == "冬眠股異動") & (a_h["code"] == 11)]
-checks.append(("復牌股帶標記（冬眠股異動分母為 20 日，故用 long 窗格）",
-               len(r11) == 1 and "復牌未滿 20 個交易日" in r11["note"].iloc[0]))
+r11 = a_h[a_h["rule"] == "冬眠股異動"]
+checks.append(("即使全部標為近期停牌，冬眠股異動仍不帶復牌備註",
+               len(r11) > 0 and all("復牌" not in n for n in r11["note"])))
 
 # 門檻設定本身的健全性
 checks += [
