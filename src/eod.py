@@ -1,12 +1,13 @@
 """盤後批次（GitHub Actions 每個交易日 16:42 執行）
 1. 更新監控名單（HKEX 證券名單 + VCM 名單）→ config/universe.csv
-2. 日線：每天一個檔 data/daily/YYYY/daily_YYYYMMDD.parquet（只新增、不覆寫，repo 不會快速膨脹）
+2. 日線：每天一個檔 data/daily/YYYY/daily_YYYYMMDD.parquet（與既有檔合併，不覆寫，見 save_daily）
 3. 以收盤資料重跑全部規則（含收市競價）→ data/report/eod_alerts_YYYYMMDD.csv、eod_summary_YYYYMMDD.csv
    ※ 盤中批次若當天失敗，以這份盤後報告為準。
 4. 明日盤中基準檔：data/stats/stats_YYYYMMDD.csv、data/profile/profile.csv（各時段每分鐘均量，近 20 日指數平均）
 5. 刪除超過保留天數的盤中快照
-用法：python src/eod.py           一般盤後
-      python src/eod.py --init    第一次使用：下載約半年日線並建立基準檔（任何時間都可執行）
+用法：python src/eod.py                      一般盤後
+      python src/eod.py --init               第一次使用：下載約半年日線並建立基準檔（任何時間都可執行）
+      python src/eod.py --refetch-daily 3mo  只重抓日線並與既有檔合併，修復被不完整下載覆寫的歷史
 """
 import json
 import shutil
@@ -31,10 +32,31 @@ def fetch_daily(uni, period):
 
 
 def save_daily(d, upto):
-    """依日期各存一檔；upto 之後（未收市）的資料不存"""
+    """依日期各存一檔；upto 之後（未收市）的資料不存。
+
+    **與既有檔案合併，不覆寫。** 盤後批次每次都重抓最近 5 天，Yahoo 偶爾只回部分資料；
+    原本的無條件覆寫會把已經正確的歷史直接摧毀，實際發生過兩次：
+      2026-10-21 由 2,789 列被覆寫成 1 列（至 10/30 才發現，已壞 9 天）
+      2026-10-28 由 2,790 列被覆寫成 25 列，連帶污染 stats_20261028.csv，
+                 使 10/29 整天（盤中 11 批次＋盤後）的 prev_close 有 58%、均量有 67% 是錯的
+    重疊的股票以新資料為準（Yahoo 會回頭修正收盤價），既有而本次沒回的一律保留。
+    本次回傳列數少於既有時留下警告，供盤後檢查資料品質。
+    """
     d = d[d["date"] <= upto]
     for dt, part in d.groupby("date"):
-        part.to_parquet(path("daily", f"{dt:%Y}", f"daily_{dt:%Y%m%d}.parquet"), index=False)
+        f = path("daily", f"{dt:%Y}", f"daily_{dt:%Y%m%d}.parquet")
+        if f.exists():
+            old = pd.read_parquet(f)
+            n_old, n_new = len(old), len(part)
+            part = (pd.concat([old, part], ignore_index=True)
+                      .drop_duplicates(subset="code", keep="last")
+                      .sort_values("code").reset_index(drop=True))
+            if n_new < n_old:
+                log.warning(f"daily_{dt:%Y%m%d}：本次下載 {n_new:,} 列少於既有 {n_old:,} 列，"
+                            f"已合併保留 {len(part):,} 列（Yahoo 回傳不完整，未覆寫）")
+            elif len(part) > n_old:
+                log.info(f"daily_{dt:%Y%m%d}：由 {n_old:,} 列補齊為 {len(part):,} 列")
+        part.to_parquet(f, index=False)
     return d["date"].nunique()
 
 
@@ -115,6 +137,26 @@ def prune_snapshots(today):
         if (today - pd.Timestamp(d.name)).days > keep:
             shutil.rmtree(d)
             log.info(f"刪除舊快照 {d.name}")
+
+
+def refetch_daily(period):
+    """只重新下載日線並與既有檔案合併，不做任何其他計算。
+
+    用途是修復被不完整下載覆寫掉的歷史日線（save_daily 的說明有兩次實例）。
+    因為 save_daily 已改為合併，重抓只會補齊缺漏，不會蓋掉既有的正確資料，
+    所以即使這次下載也不完整，也不會把情況弄得更糟。
+    用法：python src/eod.py --refetch-daily 3mo
+    """
+    uni = load_universe()
+    daily = fetch_daily(uni, period)
+    if daily.empty:
+        raise SystemExit("日線下載失敗，既有檔案未更動")
+    now = now_hkt()
+    today = now.normalize().tz_localize(None)
+    closed = now.strftime("%H%M") >= "1630"
+    last_full = daily["date"].max() if closed else daily.loc[daily["date"] < today, "date"].max()
+    n = save_daily(daily, last_full)
+    log.info(f"重抓日線（{period}）：涵蓋 {n} 個交易日，最新完整交易日 {last_full:%Y-%m-%d}")
 
 
 def main(init=False):
@@ -229,4 +271,8 @@ def eod_for_day(day, raw, daily, uni, cfg, update_prof=True, build_base=True, ba
 
 
 if __name__ == "__main__":
-    main(init="--init" in sys.argv)
+    if "--refetch-daily" in sys.argv:
+        i = sys.argv.index("--refetch-daily")
+        refetch_daily(sys.argv[i + 1] if len(sys.argv) > i + 1 else "3mo")
+    else:
+        main(init="--init" in sys.argv)
