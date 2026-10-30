@@ -65,9 +65,38 @@ def to_frame(bars, stats=None):
     return b[["code", "m", "volume"]].sort_values(["code", "m"]).reset_index(drop=True)
 
 
+def merge_bars(old, new):
+    """以 code + 分鐘 去重，同一格以新資料為準；舊有而新下載沒回的一律保留。
+
+    理由與 eod.save_daily 相同：workflow 以 `gh release upload --clobber` 上傳，
+    若直接覆寫，一次不完整的下載就會把整天的封存換成殘缺版，而封存正是所有量能
+    指標的分母來源，壞了不會報錯、只會讓分母悄悄變小。
+
+    取捨：Yahoo 會回頭修訂分鐘成交量，若某一格本來有、重抓後消失，這裡會保留舊值，
+    因此理論上可能留下已被撤回的資料。但相對於「整天封存被削掉一半」的損害，
+    保守保留是划算的——後者今天已經在日線上真實發生過兩次。
+    """
+    n_old, n_new = len(old), len(new)
+    out = (pd.concat([old[["code", "m", "volume"]], new[["code", "m", "volume"]]], ignore_index=True)
+             .drop_duplicates(subset=["code", "m"], keep="last")
+             .sort_values(["code", "m"]).reset_index(drop=True))
+    if n_new < n_old:
+        log.warning(f"本次下載 {n_new:,} 列少於 Release 既有的 {n_old:,} 列，"
+                    f"已合併保留 {len(out):,} 列（未覆寫）")
+    elif len(out) > n_old:
+        log.info(f"封存由 {n_old:,} 列補齊為 {len(out):,} 列")
+    return out
+
+
 def save_local(bars, day, stats=None):
     f = path("bars", f"bars_{day:%Y%m%d}.parquet")
     df = to_frame(bars, stats)
+    try:
+        old = _from_release(day)
+        if old is not None and not old.empty:
+            df = merge_bars(old, df)
+    except Exception as e:      # 取不到既有封存不該讓盤後批次失敗，但要留痕
+        log.warning(f"讀取 Release 既有封存失敗，本次將直接寫入（可能覆蓋掉既有內容）：{e}")
     df.to_parquet(f, compression="zstd", index=False)
     log.info(f"1 分 K 存檔 {f.name}：{df['code'].nunique()} 檔、{len(df):,} 列、{f.stat().st_size / 1e6:.1f} MB")
     return f
@@ -85,11 +114,9 @@ def _release(tag):
 # 本模組只負責存檔（save_local）與讀取（fetch / load_history / available_days）。
 
 
-def fetch(day):
-    """下載指定交易日的 1 分 K；本地已有就直接用"""
-    local = DATA / "bars" / f"bars_{day:%Y%m%d}.parquet"
-    if local.exists():
-        return pd.read_parquet(local)
+def _from_release(day):
+    """只從 Release 取該日 1 分 K，不看本地檔。save_local 合併時必須用這個——
+    它要寫的就是本地檔，用 fetch() 會讀到自己剛要覆蓋的那份。"""
     if not enabled():
         return None
     rel = _release(f"{TAG_PREFIX}{day:%Y%m%d}")
@@ -102,6 +129,14 @@ def fetch(day):
             if r.status_code == 200:
                 return pd.read_parquet(io.BytesIO(r.content))
     return None
+
+
+def fetch(day):
+    """下載指定交易日的 1 分 K；本地已有就直接用"""
+    local = DATA / "bars" / f"bars_{day:%Y%m%d}.parquet"
+    if local.exists():
+        return pd.read_parquet(local)
+    return _from_release(day)
 
 
 def load_history(days):
