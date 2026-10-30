@@ -1,8 +1,8 @@
 {
- "compared": 1988,
- "median": 1.08,
+ "compared": 2004,
+ "median": 1.09,
  "p05": 0.0,
- "p95": 2.88,
- "over_2x": 284,
- "under_0p5x": 210
+ "p95": 2.92,
+ "over_2x": 296,
+ "under_0p5x": 206
 }
