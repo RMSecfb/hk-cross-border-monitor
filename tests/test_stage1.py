@@ -2,7 +2,7 @@
 情境：
  A 正常開盤跳空      → 開盤價異常 應報
  B 下午才首次成交    → 開盤價異常 不報（首根不在 09:30+5 分內）
- C 前日停牌（復牌）  → 價格類不報；量能類仍報但帶「復牌未滿 N 個交易日」備註
+ C 前日停牌（復牌）  → 價格類不報；量能類仍報但帶「近 N 個交易日內曾停牌」備註
  D 距前一根 40 分鐘  → 1分鐘急漲急跌 不報
  E 連續分鐘急漲      → 1分鐘急漲急跌 應報
  F 除息日價格類      → 應報且帶「除息日」備註
@@ -52,9 +52,9 @@ stats = pd.DataFrame({
     "avg_turnover": [1e9] * 7,          # 全部視為活躍股
     # halted = 前一交易日停牌，價格類據此排除（隔天起 prev_close 已是真實價，不再有假跳空）
     "halted": [False, False, True, False, False, False, True],
-    # halted_5 / halted_20 = 近 N 個交易日內曾停牌，量能類據此標記（窗格對齊各指標的平均天數）
-    "halted_5": [False, False, True, False, False, False, True],
-    "halted_20": [False, False, True, False, False, False, True],
+    # halt_run_5 / halt_run_20 = 近 N 個交易日內曾有「連續 3 天以上」沒成交，量能類據此標記
+    "halt_run_5": [False, False, True, False, False, False, True],
+    "halt_run_20": [False, False, True, False, False, False, True],
     "shares": [1e9] * 7,
 })
 uni = pd.DataFrame({"code": codes, "name": [f"測試{c}" for c in codes], "vcm_pct": 10.0})
@@ -80,23 +80,23 @@ checks = [
     ("C 停牌 → 不報開盤價異常",        not has(3, "開盤價異常")),
     ("C 停牌 → 不報即時漲跌幅",        not has(3, "即時漲跌幅")),
     ("C 停牌 → 成交量暴增仍報",        has(3, "成交量暴增")),
-    ("C 停牌 → 量能帶復牌備註",        "復牌未滿 20 個交易日" in note(3, "成交量暴增")),
+    ("C 停牌 → 量能帶停牌備註",        "近 20 個交易日內曾停牌" in note(3, "成交量暴增")),
     ("D 40 分鐘跳空 → 不報 1 分鐘",    not has(4, "1分鐘急漲急跌")),
     ("E 連續分鐘急漲 → 報 1 分鐘",     has(5, "1分鐘急漲急跌")),
     ("F 除息 → 開盤價異常帶備註",      note(6, "開盤價異常") == "除息日"),
     ("G 除息+停牌 → 價格類已排除",     not has(7, "開盤價異常")),
-    ("G 除息+停牌 → 量能帶復牌備註",   "復牌未滿 20 個交易日" in note(7, "成交量暴增")),
+    ("G 除息+停牌 → 量能帶停牌備註",   "近 20 個交易日內曾停牌" in note(7, "成交量暴增")),
     ("note 欄位存在且無 NaN",          "note" in a.columns and a["note"].notna().all()),
 ]
-# ---- 復牌標記的窗格與適用範圍（2026-10-29 更正）----
+# ---- 停牌標記的窗格與適用範圍（2026-10-29 建立、2026-11-03 改寫措辭）----
 # 5 號近 5 日曾停牌但近 20 日的旗標為 False（合成情境，僅為驗證兩個窗格各自獨立作用）
 # 供日線資料，讓換手率異常也會產生警報，才驗得到「它不該被標記」
 dvol = pd.Series(3e8, index=codes)      # 3e8 / 1e9 股 = 30% 換手率 → 橙燈
 dclose = pd.Series(100.0, index=codes)
 stats_w = stats.copy()
 stats_w["halted"] = False
-stats_w["halted_5"] = [False] * 4 + [True] + [False] * 2
-stats_w["halted_20"] = [False] * 5 + [True] + [False]
+stats_w["halt_run_5"] = [False] * 4 + [True] + [False] * 2
+stats_w["halt_run_20"] = [False] * 5 + [True] + [False]
 aw = run_rules(bars, stats_w, uni, cfg, daily_close=dclose, daily_volume=dvol,
                ex_div_codes={6, 7}, baseline=base)
 
@@ -116,23 +116,23 @@ checks += [
      "換手率異常" not in HALT_TAG_RULES["short"] + HALT_TAG_RULES["long"]),
     ("映射表：冬眠股異動不在任何一組（低均額是訊號本身，不是失真）",
      "冬眠股異動" not in HALT_TAG_RULES["short"] + HALT_TAG_RULES["long"]),
-    ("halted_5 不套在 20 日分母的指標上（成交量暴增）",
-     "復牌" not in note_w(5, "成交量暴增")),
-    ("halted_20 只套在 20 日分母的指標上（成交量暴增）",
-     "復牌未滿 20 個交易日" in note_w(6, "成交量暴增")),
-    ("halted_20 不套在 5 日分母的指標上（連續放量）",
-     "復牌" not in note_w(6, "連續放量")),
+    ("halt_run_5 不套在 20 日窗格的指標上（成交量暴增）",
+     "停牌" not in note_w(5, "成交量暴增")),
+    ("halt_run_20 只套在 20 日窗格的指標上（成交量暴增）",
+     "近 20 個交易日內曾停牌" in note_w(6, "成交量暴增")),
+    ("halt_run_20 不套在 5 日窗格的指標上（連續放量）",
+     "停牌" not in note_w(6, "連續放量")),
     ("換手率異常不再被標記（分母是股本，不經歷史均值，不會失真）",
-     all("復牌" not in n for n in aw.loc[aw["rule"] == "換手率異常", "note"])),
+     all("停牌" not in n for n in aw.loc[aw["rule"] == "換手率異常", "note"])),
 ]
 
 # 舊格式基準檔（只有 halted、沒有新欄位）須自動退回原本的「復牌首日」行為
-stats_old = stats.drop(columns=["halted_5", "halted_20"])
+stats_old = stats.drop(columns=["halt_run_5", "halt_run_20"])
 ao = run_rules(bars, stats_old, uni, cfg, daily_close=dclose, daily_volume=dvol,
                ex_div_codes={6, 7}, baseline=base)
 m_old = ao[(ao["code"] == 3) & (ao["rule"] == "成交量暴增")]
 checks.append(("舊格式基準檔自動退回「復牌首日」，不會靜默失去標記",
-               len(m_old) == 1 and m_old["note"].iloc[0] == "復牌首日（倍數失真）"))
+               len(m_old) == 1 and m_old["note"].iloc[0] == "復牌首日"))
 
 bad = [n for n, ok in checks if not ok]
 for n, ok in checks:

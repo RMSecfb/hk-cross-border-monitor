@@ -71,24 +71,45 @@ def make_stats(cfg, asof):
     g = d.groupby("code")
     n_ma, n_vol = cfg["ma_days"], cfg["vol_avg_days"]
     last = d.groupby("code").tail(1).set_index("code")
-    # 停牌判定：Yahoo 於停牌期間把 OHLC 全部填成最後價、成交量 0。
-    # 復牌當日與停牌期間的價格比較會產生巨大假跳空（實測 −57%～+88%），故價格類指標需排除。
-    halted = ((last["volume"] == 0) & (last["open"] == last["close"])
-              & (last["high"] == last["low"]) & (last["open"] == last["high"]))
-    # 量能類的復牌標記看的是「平均窗格內還有沒有 0 成交量的日子」，不是「昨天是否停牌」。
-    # 故另算每檔近 N 個交易日內是否曾停牌，N 取各指標自己的平均天數（見 rules.HALT_TAG_RULES）。
-    is_halt = ((d["volume"] == 0) & (d["open"] == d["close"])
-               & (d["high"] == d["low"]) & (d["open"] == d["high"]))
-    dh = d.assign(_h=is_halt)
-    htd = cfg.get("halt_tag_days", {"short": 5, "long": 20})
+    # ---- 停牌判定（2026-11-03 改寫，見規劃書九之五）----
+    # Yahoo 對「當天沒有成交」有兩種表示法：給一列 volume=0、OHLC 全同，或整列不給。
+    # 2026-10-30 起改為後者，原本只認前者的判定因而從約 800 檔掉到 437 檔。
+    # 改以「名單 × 交易日」的格線判定：該格沒有列，或列的 volume==0，都算當天沒成交。
+    htd = cfg.get("halt_tag_days", {"short": 5, "long": 20, "run_min": 3})
+    # 排除資料不完整的日子，否則 2026-10-21 那種幾乎空白的檔案會讓全市場都被判成沒成交。
+    # 門檻取近期中位數的七成：10/30 與 11/02 的新表示法約為中位數的 78%，不會被誤擋。
+    cnt = d.groupby("date").size()
+    days_ok = sorted(cnt[cnt >= cnt.median() * cfg.get("incomplete_day_ratio", 0.7)].index)
+    traded = (d[d["date"].isin(days_ok)].assign(_t=lambda x: x["volume"] > 0)
+              .pivot_table(index="code", columns="date", values="_t", aggfunc="max")
+              .reindex(index=sorted(d["code"].unique()), columns=days_ok)
+              .fillna(False).astype(bool))
+    notrade = ~traded
+    # 價格類排除用：最近一個交易日沒有成交 → prev_close 是過期價格，比出來的跳空是假的。
+    halted = notrade[days_ok[-1]] if days_ok else pd.Series(False, index=notrade.index)
+
+    def _max_run(row):
+        """一列布林值中最長的連續 True 長度"""
+        best = cur = 0
+        for v in row:
+            cur = cur + 1 if v else 0
+            best = max(best, cur)
+        return best
+
+    # 量能類標記用：近 N 個交易日內曾有「連續 run_min 天以上」沒成交，才算一段停牌。
+    # 零星單日無成交是冬眠股的常態，不是停牌；舊的「任一天」判定會把它們全標上。
+    run_min = htd.get("run_min", 3)
+    runs = {k: (notrade[days_ok[-htd[k]:]].apply(_max_run, axis=1) >= run_min)
+            if days_ok else pd.Series(False, index=notrade.index)
+            for k in ("short", "long")}
     stats = pd.DataFrame({
         "prev_close": g["close"].last(),
         "ma": g["close"].apply(lambda s: s.tail(n_ma).mean() if len(s) >= n_ma else None),
         "avg_vol": g["volume"].apply(lambda s: s.tail(n_vol).mean()),
         "avg_turnover": (d["close"] * d["volume"]).groupby(d["code"]).apply(lambda s: s.tail(n_vol).mean()),
         "halted": halted.astype(bool),
-        "halted_5": dh.groupby("code").tail(htd["short"]).groupby("code")["_h"].any(),
-        "halted_20": dh.groupby("code").tail(htd["long"]).groupby("code")["_h"].any(),
+        "halt_run_5": runs["short"],
+        "halt_run_20": runs["long"],
         # ex_div 指「asof 當日」是否除息；盤後由 eod_for_day 直接從當日日線取得，
         # 這裡保留供查核與盤中回溯使用（盤中無法預知當日除息，故盤中不做除息標記）
         "ex_div": (last["dividends"] > 0) if "dividends" in last else False,
@@ -203,7 +224,7 @@ def eod_for_day(day, raw, daily, uni, cfg, update_prof=True, build_base=True, ba
     prev_day = load_daily(day - pd.Timedelta(days=1), 1)["date"].max()
     prev_f = path("stats", f"stats_{prev_day:%Y%m%d}.csv")
     prev_stats = pd.read_csv(prev_f) if prev_f.exists() else make_stats(cfg, prev_day)
-    if not {"halted", "halted_5", "halted_20"} <= set(prev_stats):   # 舊格式缺停牌欄，重算一份
+    if not {"halted", "halt_run_5", "halt_run_20"} <= set(prev_stats):   # 舊格式缺停牌欄，重算一份
         log.info(f"stats_{prev_day:%Y%m%d}.csv 為舊格式（缺停牌欄位），重新產生")
         prev_stats = make_stats(cfg, prev_day)
     # prev_close／ma／avg_vol 必須是「截至前一交易日」的值，但股本是靜態屬性，不該沿用快照。

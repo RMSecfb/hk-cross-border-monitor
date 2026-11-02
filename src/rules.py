@@ -18,9 +18,12 @@ VCM_AM, VCM_PM = (pd.Timedelta("9h45m"), pd.Timedelta("12h")), (pd.Timedelta("13
 # 規則分組：供「只加註不排除」的標記使用
 PRICE_RULES = ["即時漲跌幅", "開盤價異常", "1分鐘急漲急跌", "5分鐘急漲急跌", "偏離均線"]
 VOLUME_RULES = ["成交量暴增", "3分鐘量暴增", "連續放量", "換手率異常", "冬眠股異動"]
-# 復牌標記的適用範圍與回看窗格。停牌期間 Yahoo 的成交量為 0，會把「歷史均量」壓低，
-# 倍數因而失真；失真延續到那些 0 成交量的日子滾出平均窗格為止，所以回看窗格應等於
-# 各指標自己的平均天數，而不是一律只看「復牌當天」（2026-10-29 更正）。
+# 停牌標記的適用範圍與回看窗格。
+# 2026-11-03 更正：此標記原先宣稱「倍數失真」，但該前提不成立——封存只存 volume > 0 的列，
+# bars_store._day_count 明寫「整日無量者不計入」，所以 avg1／avg3／avgcum 的分子與分母
+# 都已排除沒成交的日子，停牌並不會壓低這三個指標的分母。實測也無劑量反應（無成交天數
+# 最多的那一組倍數反而最低）。保留標記是因為「這檔剛從一段停牌回來」對判讀仍是有用的
+# 背景，但措辭改為陳述事實，不再宣稱數字失真。窗格仍對齊各指標自己的平均天數。
 HALT_TAG_RULES = {
     "short": ["3分鐘量暴增", "連續放量"],      # 分母取近 5 個交易日
     "long": ["成交量暴增"],                   # 分母取近 20 個交易日
@@ -391,23 +394,22 @@ def run_rules(bars, stats, universe, cfg, daily_close=None, ex_div_codes=None,
     if ex_div_codes:
         tags.append(("除息日",
                      alerts["code"].isin(set(ex_div_codes)) & alerts["rule"].isin(PRICE_RULES)))
-    # 復牌：停牌期間 Yahoo 的成交量為 0，會把歷史均量壓低，復牌後的正常量除以被壓低的
-    # 基準，倍數自然失真（10/26 實測中位數 8 倍、最高 347 倍）。但復牌放量本身值得注意，
-    # 所以量能類只標記不排除；價格類的假跳空無判讀價值，已在各規則以 halted 排除
-    # （價格類維持只看「復牌當天」是對的：隔天起 prev_close 已是真實成交價，不再有假跳空）。
-    halt_cols = [("short", "halted_5", 5), ("long", "halted_20", 20)]
+    # 停牌：量能類只標記不排除，作為判讀背景（不是數值失真警告，理由見檔案開頭 HALT_TAG_RULES）。
+    # 價格類的假跳空無判讀價值，已在各規則以 halted 排除——價格類只看「最近一個交易日有無成交」
+    # 是對的：隔天起 prev_close 已是真實成交價，不再有假跳空。
+    halt_cols = [("short", "halt_run_5", 5), ("long", "halt_run_20", 20)]
     if any(c in stats for _, c, _ in halt_cols):
         for span, col, n in halt_cols:
             if col not in stats:
                 continue
             codes = set(stats.loc[stats[col].fillna(False).astype(bool), "code"])
             if codes:
-                tags.append((f"復牌未滿 {n} 個交易日（倍數失真）",
+                tags.append((f"近 {n} 個交易日內曾停牌",
                              alerts["code"].isin(codes) & alerts["rule"].isin(HALT_TAG_RULES[span])))
     elif "halted" in stats:      # 舊格式基準檔沒有新欄位，退回原本的「復牌首日」
         halted_codes = set(stats.loc[stats["halted"].fillna(False).astype(bool), "code"])
         if halted_codes:
-            tags.append(("復牌首日（倍數失真）",
+            tags.append(("復牌首日",
                          alerts["code"].isin(halted_codes) & alerts["rule"].isin(VOLUME_RULES)))
     # 股本來源：取不到在港股數而退回 A+H 合計者，換手率的分母偏大、數值偏低
     if "shares_src" in stats:

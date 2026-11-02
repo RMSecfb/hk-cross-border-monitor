@@ -132,15 +132,15 @@ checks += [
     ("連續放量倍數 ≈ 3", len(sk) == 1 and abs(sk["value"].iloc[0] - 3.0) < 0.05),
 ]
 
-# ---- 復牌標記：短窗格（5 日）套在連續放量上 ----
+# ---- 停牌標記：短窗格（5 日）套在連續放量上 ----
 st_h = stats[stats["code"] == 61].copy()
-st_h["halted_5"] = True
-st_h["halted_20"] = False
+st_h["halt_run_5"] = True
+st_h["halt_run_20"] = False
 a5 = run_rules(pd.DataFrame(rows2), st_h, uni[uni["code"] == 61], cfg, baseline=bl4)
 n5 = a5.loc[a5["rule"] == "連續放量", "note"]
 checks += [
-    ("連續放量（分母 5 日）吃 halted_5 標記",
-     len(n5) == 1 and "復牌未滿 5 個交易日" in n5.iloc[0]),
+    ("連續放量（5 日窗格）吃 halt_run_5 標記",
+     len(n5) == 1 and "近 5 個交易日內曾停牌" in n5.iloc[0]),
     ("標記不改變判定，仍然是同一筆警報", len(a5[a5["rule"] == "連續放量"]) == 1),
 ]
 
