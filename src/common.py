@@ -69,6 +69,13 @@ def _to_long(raw, tickers):
     if "dividends" in long.columns:          # 日線加抓 actions 時才有：供除息日標記
         long["dividends"] = pd.to_numeric(long["dividends"], errors="coerce").fillna(0)
         cols.append("dividends")
+    # 股份分割／合併比例，供還原歷史價量（見 eod.adjust_splits）。
+    # 2026-11-03 補上：先前只取 dividends，把這一欄丟掉了，導致日線序列橫跨分割點而未還原——
+    # 實測 2723 於 2026-10-06 由 747.00 跌到 70.65（10 股換 1 股），MA20 因而失真，
+    # 偏離均線連續多日報紅燈；1780 與 1094 更在 10/30 分割當天衝上風險排行第 1 與第 3 名。
+    if "stock splits" in long.columns:
+        long["splits"] = pd.to_numeric(long["stock splits"], errors="coerce").fillna(0)
+        cols.append("splits")
     return long[cols]
 
 

@@ -28,6 +28,13 @@ HALT_TAG_RULES = {
     "short": ["3分鐘量暴增", "連續放量"],      # 分母取近 5 個交易日
     "long": ["成交量暴增"],                   # 分母取近 20 個交易日
 }
+# 近期分割的標記範圍。日線價量已於 eod.adjust_splits 還原，所以價格類與吃 avg_turnover 的
+# 指標（偏離均線、即時漲跌幅、開盤價異常、冬眠股異動）都已正確，不需標記。
+# 仍需標記的是兩類：
+#   ① 分母來自 1 分 K 封存的三條——封存存的是當時的未還原成交量，分割後的量與分割前不同
+#      級距，同時點分母因而橫跨斷點；
+#   ② 換手率異常——分母 shares.csv 是靜態股本，分割後尚未更新前，換手率會整個偏掉。
+SPLIT_TAG_RULES = ["3分鐘量暴增", "連續放量", "成交量暴增", "換手率異常"]
 # 兩條指標不在內，理由各不相同：
 #   換手率異常——分子是日線成交量、分母是股本，完全不經過歷史均值，停牌不會造成失真。
 #   冬眠股異動——冬眠股的零成交日，資料特徵與停牌完全相同（volume=0、OHLC 全同），
@@ -411,6 +418,12 @@ def run_rules(bars, stats, universe, cfg, daily_close=None, ex_div_codes=None,
         if halted_codes:
             tags.append(("復牌首日",
                          alerts["code"].isin(halted_codes) & alerts["rule"].isin(VOLUME_RULES)))
+    # 近期分割：價量已還原，但 1 分 K 封存與 shares.csv 仍是分割前的級距（見 SPLIT_TAG_RULES）
+    if "split_recent" in stats:
+        sp = set(stats.loc[stats["split_recent"].fillna(False).astype(bool), "code"])
+        if sp:
+            tags.append(("近期曾股份分割（分母未還原）",
+                         alerts["code"].isin(sp) & alerts["rule"].isin(SPLIT_TAG_RULES)))
     # 股本來源：取不到在港股數而退回 A+H 合計者，換手率的分母偏大、數值偏低
     if "shares_src" in stats:
         impl = set(stats.loc[stats["shares_src"] == "implied", "code"])

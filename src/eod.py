@@ -66,8 +66,40 @@ def load_daily(upto, n):
     return pd.concat([pd.read_parquet(f) for f in files]) if files else pd.DataFrame()
 
 
+def adjust_splits(d):
+    """以 Yahoo 的 stock splits 欄位回頭還原歷史價量，回傳 (還原後的日線, 各檔最後一次分割日)。
+
+    為什麼需要：日線是未還原價（auto_adjust=False）。股份分割／合併當天價格會跳一個級距，
+    若不還原，橫跨分割點的 MA20、20 日均量、均成交額與前收全部失真——2026-10-06 的 2723
+    由 747.00 變成 70.65，偏離均線因而連日報紅；1780 與 1094 在 10/30 分割當天衝上風險
+    排行第 1 與第 3 名，「即時漲跌幅 −83%」整個是分割造成的。
+
+    做法是標準的回頭還原：某一列之後若還有分割，就把該列的價格除以其後所有分割比例的乘積、
+    成交量乘上同一乘積。分割當天及其後的列不動，因為它們已經是分割後的基準。
+
+    只用 Yahoo 給的欄位，不用價量關係推測——推測的分離度不足（實測有 5 檔次落在分不出來的
+    邊界），誤判就會把正確資料改壞。沒有這一欄（舊檔）或全為 0 時，本函式不做任何事。
+    """
+    if "splits" not in d.columns or not (d["splits"] > 0).any():
+        return d, {}
+    d = d.sort_values(["code", "date"]).copy()
+    sp = d["splits"].where(d["splits"] > 0, 1.0)
+    # 每一列「其後所有分割」的乘積：在各檔內由後往前累乘，再往前位移一格（不含自己當天）
+    cum = (sp[::-1].groupby(d["code"][::-1]).cumprod()[::-1]
+           .groupby(d["code"]).shift(-1).fillna(1.0))
+    for c in ("open", "high", "low", "close"):
+        d[c] = d[c] / cum
+    d["volume"] = d["volume"] * cum
+    last = (d[d["splits"] > 0].groupby("code")["date"].max().to_dict())
+    if last:
+        log.info(f"還原股份分割：{len(last)} 檔，最近一次 "
+                 + "、".join(f"{c}@{t:%m/%d}" for c, t in sorted(last.items(), key=lambda x: -x[1].toordinal())[:5]))
+    return d, last
+
+
 def make_stats(cfg, asof):
     d = load_daily(asof, SETTINGS["history_days"]).sort_values(["code", "date"])
+    d, split_at = adjust_splits(d)      # 價量先還原，之後的 ma／均量／均額／前收才有可比性
     g = d.groupby("code")
     n_ma, n_vol = cfg["ma_days"], cfg["vol_avg_days"]
     last = d.groupby("code").tail(1).set_index("code")
@@ -114,6 +146,11 @@ def make_stats(cfg, asof):
         # 這裡保留供查核與盤中回溯使用（盤中無法預知當日除息，故盤中不做除息標記）
         "ex_div": (last["dividends"] > 0) if "dividends" in last else False,
     }).reset_index()
+    # 近 N 個交易日內曾分割：價量已還原，但 1 分 K 封存的成交量仍是當時的未還原值，
+    # 故量能類的同時點分母仍橫跨分割點，加註供判讀（見規劃書九之六）。
+    cut = days_ok[-htd["long"]] if days_ok else None
+    stats["split_recent"] = stats["code"].isin(
+        {c for c, t in split_at.items() if cut is not None and t >= cut})
     shares = CONFIG / "shares.csv"
     if shares.exists():
         sh = pd.read_csv(shares)
