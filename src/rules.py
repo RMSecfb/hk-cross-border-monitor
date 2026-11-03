@@ -28,13 +28,21 @@ HALT_TAG_RULES = {
     "short": ["3分鐘量暴增", "連續放量"],      # 分母取近 5 個交易日
     "long": ["成交量暴增"],                   # 分母取近 20 個交易日
 }
-# 近期分割的標記範圍。日線價量已於 eod.adjust_splits 還原，所以價格類與吃 avg_turnover 的
-# 指標（偏離均線、即時漲跌幅、開盤價異常、冬眠股異動）都已正確，不需標記。
-# 仍需標記的是兩類：
+# 近期分割的標記分成兩組，因為失真的來源不同（見規劃書九之六）。
+#
+# 第一組 SPLIT_TAG_RULES：Yahoo 的歷史價格已還原過分割（實測 11 檔中 10 檔），日線價量
+# 因此是對的，但另外兩個分母沒有跟著還原：
 #   ① 分母來自 1 分 K 封存的三條——封存存的是當時的未還原成交量，分割後的量與分割前不同
 #      級距，同時點分母因而橫跨斷點；
 #   ② 換手率異常——分母 shares.csv 是靜態股本，分割後尚未更新前，換手率會整個偏掉。
 SPLIT_TAG_RULES = ["3分鐘量暴增", "連續放量", "成交量暴增", "換手率異常"]
+# 第二組 SPLIT_UNADJ_RULES：少數分割 Yahoo 沒有回頭還原（1351 於 11/02 即是），序列留著
+# 一個倍數斷點，於是連跨多日的價格／成交額分母本身就是錯的：
+#   偏離均線——20 日 ma 橫跨斷點；冬眠股異動——avg_turnover 橫跨斷點。
+# 即時漲跌幅、開盤價異常不在內：它們只比 prev_close，斷點隔天起就是乾淨的成交價。
+# 只標記「經查證確實沒還原」的那幾檔（eod.recent_splits 以實際價格比對帳記錄比例），
+# 不是把所有分割股一律標上——否則 11 檔裡有 10 檔會被誤標，標記就沒有意義了。
+SPLIT_UNADJ_RULES = ["偏離均線", "冬眠股異動"]
 # 兩條指標不在內，理由各不相同：
 #   換手率異常——分子是日線成交量、分母是股本，完全不經過歷史均值，停牌不會造成失真。
 #   冬眠股異動——冬眠股的零成交日，資料特徵與停牌完全相同（volume=0、OHLC 全同），
@@ -424,6 +432,12 @@ def run_rules(bars, stats, universe, cfg, daily_close=None, ex_div_codes=None,
         if sp:
             tags.append(("近期曾股份分割（分母未還原）",
                          alerts["code"].isin(sp) & alerts["rule"].isin(SPLIT_TAG_RULES)))
+    # 分割未還原：連 ma / avg_turnover 都橫跨斷點，價格類也失真（見 SPLIT_UNADJ_RULES）
+    if "split_unadjusted" in stats:
+        su = set(stats.loc[stats["split_unadjusted"].fillna(False).astype(bool), "code"])
+        if su:
+            tags.append(("近期分割且歷史價未還原（均線／均額橫跨斷點）",
+                         alerts["code"].isin(su) & alerts["rule"].isin(SPLIT_UNADJ_RULES)))
     # 股本來源：取不到在港股數而退回 A+H 合計者，換手率的分母偏大、數值偏低
     if "shares_src" in stats:
         impl = set(stats.loc[stats["shares_src"] == "implied", "code"])

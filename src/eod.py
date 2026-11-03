@@ -82,21 +82,43 @@ def recent_splits(d):
 
     欄位本身仍然有用：分割後 1 分 K 封存的成交量級距改變、shares.csv 的股本尚未更新，
     故以日期產生 split_recent 標記供人工判讀（見 rules.SPLIT_TAG_RULES）。
+
+    2026-11-03 補充：「已還原」是絕大多數而非全部。1351 於 11/02 分割比例 0.2，
+    價格 1.250 → 0.250，實際價格比恰好等於記錄比例 —— Yahoo 這一筆沒有回頭還原，
+    序列留著一個 5 倍斷點，20 日均線橫跨它就會失真。故另外回傳 unadj：以「分割當日
+    的實際價格比」對照 Yahoo 自己記的比例判定，已還原則價格沒跳（實際比 ≈ 1），
+    未還原則實際比 ≈ 記錄比例。這是拿兩個已知數字對帳，不是從價量形態推測。
+
+    回傳 (last, unadj)：last = {code: 最後一次分割日}，unadj = {code: 未還原的分割日}。
     """
     if "splits" not in d.columns:
-        return {}
+        return {}, {}
     sp = d[d["splits"] > 0]
     if sp.empty:
-        return {}
+        return {}, {}
     last = sp.groupby("code")["date"].max().to_dict()
+    unadj = {}
+    for code, g in d.sort_values("date").groupby("code"):
+        for _, e in g[g["splits"] > 0].iterrows():
+            prior = g[g["date"] < e["date"]]
+            if prior.empty:
+                continue
+            pc, r = prior["close"].iloc[-1], float(e["splits"])
+            if not pc or not r or 0.8 <= r <= 1.25:   # 比例本身接近 1 → 無從判別，不標
+                continue
+            if 0.8 <= (e["close"] / pc) / r <= 1.25:  # 實際價格比 ≈ 記錄比例 → 沒還原
+                unadj[code] = max(unadj.get(code, e["date"]), e["date"])
     log.info(f"近期股份分割 {len(last)} 檔（僅標記，不調整價量）：最近 "
              + "、".join(f"{c}@{t:%m/%d}" for c, t in sorted(last.items(), key=lambda x: -x[1].toordinal())[:5]))
-    return last
+    if unadj:
+        log.warning(f"其中 {len(unadj)} 檔 Yahoo 未回頭還原歷史價，均線橫跨斷點："
+                    + "、".join(f"{c}@{t:%m/%d}" for c, t in sorted(unadj.items())))
+    return last, unadj
 
 
 def make_stats(cfg, asof):
     d = load_daily(asof, SETTINGS["history_days"]).sort_values(["code", "date"])
-    split_at = recent_splits(d)         # 只取分割日期供標記；價量不調整（Yahoo 已還原過）
+    split_at, split_unadj = recent_splits(d)   # 只取日期供標記；價量不調整（Yahoo 已還原過）
     g = d.groupby("code")
     n_ma, n_vol = cfg["ma_days"], cfg["vol_avg_days"]
     last = d.groupby("code").tail(1).set_index("code")
@@ -148,6 +170,9 @@ def make_stats(cfg, asof):
     cut = days_ok[-htd["long"]] if days_ok else None
     stats["split_recent"] = stats["code"].isin(
         {c for c, t in split_at.items() if cut is not None and t >= cut})
+    # 其中 Yahoo 沒有回頭還原的，連 ma / avg_turnover 都橫跨斷點，價格類也要加註。
+    stats["split_unadjusted"] = stats["code"].isin(
+        {c for c, t in split_unadj.items() if cut is not None and t >= cut})
     shares = CONFIG / "shares.csv"
     if shares.exists():
         sh = pd.read_csv(shares)
