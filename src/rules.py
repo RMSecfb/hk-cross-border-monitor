@@ -28,7 +28,7 @@ HALT_TAG_RULES = {
     "short": ["3分鐘量暴增", "連續放量"],      # 分母取近 5 個交易日
     "long": ["成交量暴增"],                   # 分母取近 20 個交易日
 }
-# 近期分割的標記分成兩組，因為失真的來源不同（見規劃書九之六）。
+# 近期分割的標記分成兩組，因為失真的來源不同（見規劃書九之五）。
 #
 # 第一組 SPLIT_TAG_RULES：Yahoo 的歷史價格已還原過分割（實測 11 檔中 10 檔），日線價量
 # 因此是對的，但另外兩個分母沒有跟著還原：
@@ -77,7 +77,7 @@ def dual_grade(values, avg_turnover, cur_turnover, th, split, allow_b=True):
         lv[k] = np.where(cur >= t.get("min_turnover", 0), grade(values, t), None)
     is_a = np.asarray(pd.Series(avg_turnover).fillna(-1).values) >= split
     # 冬眠股（B 軌）只在該檔的「同時點分母」可用時才開啟：舊的時段內插分母對幾乎不交易的股票
-    # 會把極小的基準放大成數百倍，先用舊公式開 B 軌等於自找雜訊（見規劃書 一、過渡期做法）。
+    # 會把極小的基準放大成數百倍，先用舊公式開 B 軌等於自找雜訊（見規劃書九之一「逐檔閘門」）。
     allow = np.broadcast_to(np.asarray(allow_b, dtype=bool), is_a.shape)
     return np.where(is_a, lv["A"], np.where(allow, lv["B"], None))
 

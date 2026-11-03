@@ -122,7 +122,7 @@ def make_stats(cfg, asof):
     g = d.groupby("code")
     n_ma, n_vol = cfg["ma_days"], cfg["vol_avg_days"]
     last = d.groupby("code").tail(1).set_index("code")
-    # ---- 停牌判定（2026-11-03 改寫，見規劃書九之五）----
+    # ---- 停牌判定（2026-11-03 改寫，見規劃書九之三）----
     # Yahoo 對「當天沒有成交」有兩種表示法：給一列 volume=0、OHLC 全同，或整列不給。
     # 2026-10-30 起改為後者，原本只認前者的判定因而從約 800 檔掉到 437 檔。
     # 改以「名單 × 交易日」的格線判定：該格沒有列，或列的 volume==0，都算當天沒成交。
@@ -166,7 +166,7 @@ def make_stats(cfg, asof):
         "ex_div": (last["dividends"] > 0) if "dividends" in last else False,
     }).reset_index()
     # 近 N 個交易日內曾分割：價量已還原，但 1 分 K 封存的成交量仍是當時的未還原值，
-    # 故量能類的同時點分母仍橫跨分割點，加註供判讀（見規劃書九之六）。
+    # 故量能類的同時點分母仍橫跨分割點，加註供判讀（見規劃書九之五）。
     cut = days_ok[-htd["long"]] if days_ok else None
     stats["split_recent"] = stats["code"].isin(
         {c for c, t in split_at.items() if cut is not None and t >= cut})
