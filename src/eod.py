@@ -66,40 +66,37 @@ def load_daily(upto, n):
     return pd.concat([pd.read_parquet(f) for f in files]) if files else pd.DataFrame()
 
 
-def adjust_splits(d):
-    """以 Yahoo 的 stock splits 欄位回頭還原歷史價量，回傳 (還原後的日線, 各檔最後一次分割日)。
+def recent_splits(d):
+    """回傳各檔最後一次股份分割／合併的日期（供 split_recent 標記），**不調整價量**。
 
-    為什麼需要：日線是未還原價（auto_adjust=False）。股份分割／合併當天價格會跳一個級距，
-    若不還原，橫跨分割點的 MA20、20 日均量、均成交額與前收全部失真——2026-10-06 的 2723
-    由 747.00 變成 70.65，偏離均線因而連日報紅；1780 與 1094 在 10/30 分割當天衝上風險
-    排行第 1 與第 3 名，「即時漲跌幅 −83%」整個是分割造成的。
+    2026-11-03：本函式原為 `adjust_splits`，會回頭還原歷史價量。那是錯的——
+    **Yahoo 的歷史價格本來就已經還原過分割**。`auto_adjust=False` 只影響股息還原
+    （Close vs Adj Close），分割一律已套用在 OHLC 上；`stock splits` 欄位只是事件註記，
+    不是「待套用的調整」。
 
-    做法是標準的回頭還原：某一列之後若還有分割，就把該列的價格除以其後所有分割比例的乘積、
-    成交量乘上同一乘積。分割當天及其後的列不動，因為它們已經是分割後的基準。
+    實測 63 筆分割事件中有 60 筆（95%）的比例與 Yahoo 自家價格序列不一致，且方向一致：
+    分割當天的實際價格比幾乎都是 1.0（價格根本沒跳）。例如 1657 於 10/05 比例 10.0，
+    價格 5.500 → 5.000；8159 於 10/15 比例 0.05，價格 1.160 → 1.160。
+    再還原一次就是把正確資料改壞——1351 因此被 ×5 成 6.25，而次日為 0.25，
+    憑空造出 25 倍斷點。
 
-    只用 Yahoo 給的欄位，不用價量關係推測——推測的分離度不足（實測有 5 檔次落在分不出來的
-    邊界），誤判就會把正確資料改壞。沒有這一欄（舊檔）或全為 0 時，本函式不做任何事。
+    欄位本身仍然有用：分割後 1 分 K 封存的成交量級距改變、shares.csv 的股本尚未更新，
+    故以日期產生 split_recent 標記供人工判讀（見 rules.SPLIT_TAG_RULES）。
     """
-    if "splits" not in d.columns or not (d["splits"] > 0).any():
-        return d, {}
-    d = d.sort_values(["code", "date"]).copy()
-    sp = d["splits"].where(d["splits"] > 0, 1.0)
-    # 每一列「其後所有分割」的乘積：在各檔內由後往前累乘，再往前位移一格（不含自己當天）
-    cum = (sp[::-1].groupby(d["code"][::-1]).cumprod()[::-1]
-           .groupby(d["code"]).shift(-1).fillna(1.0))
-    for c in ("open", "high", "low", "close"):
-        d[c] = d[c] / cum
-    d["volume"] = d["volume"] * cum
-    last = (d[d["splits"] > 0].groupby("code")["date"].max().to_dict())
-    if last:
-        log.info(f"還原股份分割：{len(last)} 檔，最近一次 "
-                 + "、".join(f"{c}@{t:%m/%d}" for c, t in sorted(last.items(), key=lambda x: -x[1].toordinal())[:5]))
-    return d, last
+    if "splits" not in d.columns:
+        return {}
+    sp = d[d["splits"] > 0]
+    if sp.empty:
+        return {}
+    last = sp.groupby("code")["date"].max().to_dict()
+    log.info(f"近期股份分割 {len(last)} 檔（僅標記，不調整價量）：最近 "
+             + "、".join(f"{c}@{t:%m/%d}" for c, t in sorted(last.items(), key=lambda x: -x[1].toordinal())[:5]))
+    return last
 
 
 def make_stats(cfg, asof):
     d = load_daily(asof, SETTINGS["history_days"]).sort_values(["code", "date"])
-    d, split_at = adjust_splits(d)      # 價量先還原，之後的 ma／均量／均額／前收才有可比性
+    split_at = recent_splits(d)         # 只取分割日期供標記；價量不調整（Yahoo 已還原過）
     g = d.groupby("code")
     n_ma, n_vol = cfg["ma_days"], cfg["vol_avg_days"]
     last = d.groupby("code").tail(1).set_index("code")
