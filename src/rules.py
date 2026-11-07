@@ -165,13 +165,15 @@ def run_rules(bars, stats, universe, cfg, daily_close=None, ex_div_codes=None,
         b["n_short"] = 0
     g = b.groupby("code", sort=False)
 
-    # ---- 冷門股過濾（當日成交額過低者不做短時指標）；活躍股 = 20 日平均成交額達門檻 ----
+    # ---- 冷門股過濾（當日成交額過低者不做短時指標）----
+    # 活躍股 = 當日成交額達門檻「且」20 日平均成交額達門檻，兩個條件都要（見下方 active）。
     b["turnover_hkd"] = (b["close"] * b["volume"]).groupby(b["code"]).transform("sum")
     liquid = b["turnover_hkd"] >= cfg["min_turnover_hkd"]
     avg_to = b["avg_turnover"] if "avg_turnover" in b else pd.Series(np.inf, index=b.index)
     active = liquid & (avg_to >= cfg["active_min_avg_turnover_hkd"])
 
-    # ---- 停牌排除：前一交易日成交量 0 且 OHLC 全同者，復牌跳空非交易異常 ----
+    # ---- 停牌排除：最近一個交易日沒有成交者，復牌跳空非交易異常 ----
+    # halted 由 eod.py 以「名單 × 交易日」格線算出（整列缺席或 volume == 0），見規劃書九之三。
     # 全市場每日有 22–29% 的股票處於停牌狀態；實測 10/27 開盤價異常 226 檔中有 71 檔（31%）屬此類。
     not_halted = ~b["halted"].fillna(False).astype(bool) if "halted" in b else pd.Series(True, index=b.index)
     tradable = liquid & not_halted      # 價格類用：停牌排除

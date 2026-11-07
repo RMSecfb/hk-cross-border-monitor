@@ -96,7 +96,7 @@ repo 容量：快照保留 30 天（`config/settings.yaml` 的 `keep_snapshot_da
 | 條件 | 參數 | 適用規則 |
 | --- | --- | --- |
 | 當日成交額 ≥ 100 萬 | `min_turnover_hkd` | 1 分鐘／5 分鐘急漲急跌、即時漲跌幅、開盤價異常 |
-| 20 日均成交額 ≥ 1,000 萬（活躍股） | `active_min_avg_turnover_hkd` | **連續放量、偏離均線** |
+| 活躍股＝**當日成交額 ≥ 100 萬 且 20 日均成交額 ≥ 1,000 萬**（兩者都要） | `min_turnover_hkd` ＋ `active_min_avg_turnover_hkd` | **連續放量、偏離均線** |
 | A／B 雙軌（分池門檻 1,000 萬） | `pool_split_turnover` | **成交量暴增、3 分鐘量暴增**——A 軌當下累計成交額 ≥ 100 萬、B 軌 ≥ 500 萬 |
 | 20 日均成交額 < 50 萬（冬眠股） | `dormant_move.max_avg_turnover` | 冬眠股異動 |
 | 逐檔天數閘門 | `min_hist_days`（5）、`min_hist_days_cum`（10） | 3 分鐘量暴增／連續放量需 5 個交易日、成交量暴增需 10 個 |
