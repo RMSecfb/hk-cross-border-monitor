@@ -1,9 +1,11 @@
 """規則引擎：對「全部股票的當日 1 分鐘 K 線」一次計算所有監控指標
 輸入
   bars    : code, time, open, high, low, close, volume（time 為香港時間、不含時區）
-  stats   : code, prev_close, ma, avg_vol, [shares]          ← eod.py 產生
+  stats   : code, prev_close, ma, avg_vol, avg_turnover, halted, halt_run_5, halt_run_20,
+            ex_div, split_recent, split_unadjusted, [shares, shares_src]   ← eod.py 產生
   universe: code, name, vcm_pct
-  profile : code, bucket, vol_per_min（可為 None）            ← eod.py 產生
+  baseline: code, m, avg1, avg3, avgcum, n_short, n_long（可為 None）      ← bars_store 產生
+            為 None 時量能三指標一律不計算，沒有退回的分母（舊的 30 分鐘時段內插已移除）
 輸出
   alerts  : time, code, name, rule, level, value, detail
 """

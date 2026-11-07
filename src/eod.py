@@ -3,8 +3,10 @@
 2. 日線：每天一個檔 data/daily/YYYY/daily_YYYYMMDD.parquet（與既有檔合併，不覆寫，見 save_daily）
 3. 以收盤資料重跑全部規則（含收市競價）→ data/report/eod_alerts_YYYYMMDD.csv、eod_summary_YYYYMMDD.csv
    ※ 盤中批次若當天失敗，以這份盤後報告為準。
-4. 明日盤中基準檔：data/stats/stats_YYYYMMDD.csv、data/profile/profile.csv（各時段每分鐘均量，近 20 日指數平均）
-5. 刪除超過保留天數的盤中快照
+4. 明日盤中基準檔：data/stats/stats_YYYYMMDD.csv
+5. 1 分 K 與同時點基準上傳 GitHub Releases（bars-YYYYMMDD 標籤，與既有檔合併不覆寫）
+6. data/profile/profile.csv（各時段每分鐘均量）：已不參與任何指標計算，僅保留歷史
+7. 刪除超過保留天數的盤中快照
 用法：python src/eod.py                      一般盤後
       python src/eod.py --init               第一次使用：下載約半年日線並建立基準檔（任何時間都可執行）
       python src/eod.py --refetch-daily 3mo  只重抓日線並與既有檔合併，修復被不完整下載覆寫的歷史
@@ -268,13 +270,13 @@ def main(init=False):
 def eod_for_day(day, raw, daily, uni, cfg, update_prof=True, build_base=True, baseline="auto"):
     """單一交易日的盤後計算（盤後批次與補跑共用）。daily 需含該日與之前的日線，且日線檔已存檔。
 
-    update_prof=False：不更新分鐘量基準 profile.csv。補跑時必須關掉——補的日子多半已經在
-      profile 裡，再灌一次會讓基準偏向那幾天，而 profile 正是盤中的退回分母。
+    update_prof=False：不更新 profile.csv。注意 profile 已不參與任何指標計算（舊的 30 分鐘
+      時段內插分母已移除），僅為保留歷史而維護；補跑時仍關掉，避免基準偏向補的那幾天。
     build_base=False：跑完後不重算、不另存同時點基準檔。補跑時關掉——基準統一交給當天的
       盤後批次重算後上傳，補跑只負責累積 1 分 K。
     baseline="auto"：自行向 Release 取最近一份基準（盤後批次用）。補跑要自己算，因為
       available_days() 會抓到比補跑日更晚的日期，必須由呼叫端只餵嚴格早於 day 的歷史；
-      傳 None 則明確表示沒有基準，一律走退回的時段內插法。
+      傳 None 則明確表示沒有基準——此時量能三指標一律不計算，沒有退回的分母。
     """
     raw = raw[raw["time"].dt.normalize() == day]
     bars = raw.merge(uni[["yahoo", "code"]], left_on="ticker", right_on="yahoo").drop(columns=["ticker", "yahoo"])
